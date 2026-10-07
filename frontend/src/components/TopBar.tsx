@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { format } from 'date-fns'
+import { useHazards } from '../store/hazards'
+import { assess, levelStyles } from '../lib/hazardStatus'
 
 export default function TopBar() {
   const [now, setNow] = useState(new Date())
+  const weather = useHazards((s) => s.weather)
+  const quakes = useHazards((s) => s.quakes)
+  const status = assess(weather, quakes)
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000)
@@ -17,9 +23,12 @@ export default function TopBar() {
       </div>
 
       <div className="flex items-center gap-3">
-        <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300">
-          Disaster status: --
-        </span>
+        <Link
+          to="/disaster"
+          className={`rounded-full border px-3 py-1 text-xs ${levelStyles[status.level]}`}
+        >
+          Disaster status: {status.label}
+        </Link>
         <span className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300">
           <span className="h-2 w-2 rounded-full bg-slate-500" />
           Backend: not connected
