@@ -4,7 +4,7 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useHazards } from '../store/hazards'
-import { assess, levelStyles } from '../lib/hazardstatus'
+import { assess, levelStyles } from '../lib/hazardStatus'
 import { describeWeather, fsoOutlook } from '../lib/weather'
 import { LOCATION } from '../lib/config'
 

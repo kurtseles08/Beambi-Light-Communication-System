@@ -2,12 +2,13 @@ import { Routes, Route } from 'react-router-dom'
 import Layout from './components/Layout'
 import Placeholder from './pages/Placeholder'
 import DisasterStatus from './pages/DisasterStatus'
+import LiveDebug from './pages/LiveDebug'
 
 export default function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<Placeholder title="Home" note="Active channel, link state, RSSI gauge, latency, bitrate, battery, alerts." />} />
+        <Route index element={<LiveDebug />} />
         <Route path="disaster" element={<DisasterStatus />} />
         <Route path="alignment" element={<Placeholder title="Alignment" note="Live RSSI, peak hold, trend, lock indicator." />} />
         <Route path="link" element={<Placeholder title="Link Details" note="FSO metrics, RF metrics, packet log." />} />

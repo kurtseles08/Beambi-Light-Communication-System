@@ -3,15 +3,21 @@ import { Outlet } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import TopBar from './TopBar'
 import { useHazards } from '../store/hazards'
+import { useLink } from '../store/link'
 
 export default function Layout() {
   const refresh = useHazards((s) => s.refresh)
+  const connect = useLink((s) => s.connect)
 
   useEffect(() => {
     refresh()
     const id = setInterval(refresh, 5 * 60 * 1000)
     return () => clearInterval(id)
   }, [refresh])
+
+  useEffect(() => {
+    connect()
+  }, [connect])
 
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-100">
