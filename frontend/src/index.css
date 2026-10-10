@@ -1,1 +1,157 @@
 @import "tailwindcss";
+
+@theme {
+  --color-forest-950: #0a1d12;
+  --color-forest-900: #0f2a1a;
+  --color-forest-800: #164628;
+  --color-forest-700: #1d5a33;
+  --color-leaf-600: #2e9b57;
+  --color-leaf-500: #3fae63;
+  --color-leaf-400: #5cc47a;
+  --color-mint-200: #cfebd6;
+  --color-mint-100: #e1efe0;
+  --color-mint-50: #f1f8f0;
+  --color-moss-600: #4e6b58;
+  --color-brass-500: #a39565;
+
+  --color-ok: #2e9b57;
+  --color-warn: #d9962b;
+  --color-crit: #d4492f;
+  --color-warn-soft: #f2c46d;
+  --color-crit-soft: #f08a73;
+  --color-ok-ink: #1d6b3a;
+  --color-warn-ink: #8a5a0a;
+  --color-crit-ink: #9b2c1f;
+
+  --shadow-card: 0 1px 2px rgb(15 42 26 / 0.06), 0 12px 28px -14px rgb(15 42 26 / 0.3);
+
+  --font-sans: 'Barlow', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Barlow Condensed', 'Barlow', ui-sans-serif, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
+  --font-stencil: 'Saira Stencil One', 'Barlow Condensed', ui-sans-serif, sans-serif;
+
+  /* Bridge for the legacy /debug page */
+  --color-slate-950: #e1efe0;
+  --color-slate-900: #fbfdfb;
+  --color-slate-800: #d5e5d3;
+  --color-slate-700: #bcd3b9;
+  --color-slate-600: #9fc4a6;
+  --color-slate-500: #6f8f78;
+  --color-slate-400: #4e6b58;
+  --color-slate-300: #3a5444;
+  --color-slate-200: #0f2a1a;
+  --color-slate-100: #0f2a1a;
+  --color-sky-300: #1d5a33;
+  --color-sky-400: #2e9b57;
+  --color-sky-500: #3fae63;
+  --color-sky-700: #3fae63;
+  --color-emerald-300: #1d6b3a;
+  --color-emerald-400: #2e9b57;
+  --color-emerald-500: #3fae63;
+  --color-emerald-700: #2e9b57;
+  --color-amber-300: #8a5a0a;
+  --color-amber-400: #d9962b;
+  --color-amber-500: #d9962b;
+  --color-amber-600: #c0841f;
+  --color-red-300: #9b2c1f;
+  --color-red-400: #d4492f;
+  --color-red-500: #d4492f;
+  --color-red-600: #b8402d;
+  --color-red-800: #e3a79c;
+}
+
+@layer base {
+  body {
+    background: var(--color-forest-900);
+    color: var(--color-forest-900);
+    font-family: var(--font-sans);
+  }
+  h1, h2, h3 {
+    font-family: var(--font-display);
+    letter-spacing: 0.02em;
+  }
+  h1 {
+    text-transform: uppercase;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-leaf-500);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--color-mint-200);
+  }
+  * {
+    scrollbar-color: #9fc4a6 transparent;
+  }
+}
+
+/* Green gradient backdrop with a faint map grid */
+.app-backdrop {
+  background:
+    repeating-linear-gradient(0deg, rgb(255 255 255 / 0.05) 0 1px, transparent 1px 48px),
+    repeating-linear-gradient(90deg, rgb(255 255 255 / 0.05) 0 1px, transparent 1px 48px),
+    radial-gradient(60rem 40rem at 85% 0%, rgb(92 196 122 / 0.55), transparent 60%),
+    linear-gradient(135deg, #0f4d27 0%, #1d8a45 55%, #0b3a1d 100%);
+}
+
+/* Glass sidebar. Closed: slides left, leaving a 22px sliver as the hover handle. */
+.sidebar-glass {
+  position: fixed;
+  z-index: 40;
+  left: 12px;
+  top: 12px;
+  bottom: 12px;
+  width: 264px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 1.5rem;
+  border: 1px solid rgb(255 255 255 / 0.28);
+  background:
+    linear-gradient(160deg, rgb(255 255 255 / 0.22), rgb(255 255 255 / 0.04) 55%),
+    rgb(10 29 18 / 0.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  backdrop-filter: blur(24px) saturate(1.5);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.35),
+    0 24px 60px -24px rgb(0 0 0 / 0.7);
+  transform: translateX(calc(-100% + 10px));
+  transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sidebar-glass[data-open='true'] {
+  transform: none;
+}
+
+/* Content frame gives way to the sidebar on large screens */
+.shell {
+  padding-left: 22px;
+  transition: padding-left 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (min-width: 1024px) {
+  .shell[data-open='true'] {
+    padding-left: 276px;
+  }
+}
+
+.logo-glow {
+  filter: drop-shadow(0 0 16px rgb(92 196 122 / 0.5));
+}
+
+/* Panels rise in one after another (--i is the index) */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: none; }
+}
+.rise {
+  animation: rise 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    transition-duration: 0.01ms !important;
+  }
+  .rise {
+    animation: none;
+  }
+}
