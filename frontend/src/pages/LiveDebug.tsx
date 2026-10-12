@@ -1,69 +1,63 @@
+import type { CSSProperties } from 'react'
 import { format } from 'date-fns'
 import { useLink } from '../store/link'
+import Panel from '../components/Panel'
+import { Pill } from '../components/ui'
+import type { Inject } from '../types'
 
-const buttons = [
-  ['fog', 'Simulate fog'],
-  ['obstruction', 'Block beam'],
-  ['clear', 'Clear'],
-] as const
+const idx = (i: number) => ({ '--i': i }) as CSSProperties
 
+const controls: { kind: Inject; label: string; hint: string }[] = [
+  { kind: 'fog', label: 'Fog', hint: 'Gradual signal loss until you clear it' },
+  { kind: 'dust', label: 'Dust or haze', hint: 'Milder gradual loss, low humidity' },
+  { kind: 'drift', label: 'Beam drift', hint: 'Slow misalignment, signal creeps down' },
+  { kind: 'obstruction', label: 'Block the beam', hint: 'Sudden signal loss for 12 s' },
+  { kind: 'glare', label: 'Strong sunlight', hint: 'Ambient light disturbs the receiver' },
+  { kind: 'lossburst', label: 'Packet-loss burst', hint: '15 s of lost frames' },
+  { kind: 'tamper', label: 'Tamper alert', hint: 'A unit enclosure is opened' },
+  { kind: 'lowbattery', label: 'Low battery', hint: 'Unit A drops to the warning level' },
+  { kind: 'clear', label: 'Clear', hint: 'Back to normal conditions' },
+]
+
+const tone = { Info: 'text-forest-800', Warning: 'text-warn-ink', Critical: 'text-crit-ink' } as const
+
+// Temporary until the Settings screen has its own test and demo mode
 export default function LiveDebug() {
-  const latest = useLink((s) => s.latest)
   const events = useLink((s) => s.events)
+  const scenario = useLink((s) => s.scenario)
   const inject = useLink((s) => s.inject)
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">Live feed (temporary)</h1>
-        <p className="text-sm text-slate-400">
-          Raw simulator data. The real Home screen replaces this in the next step.
-        </p>
+    <div className="space-y-6">
+      <div className="rise" style={idx(0)}>
+        <h1 className="text-3xl font-bold">Demo controls</h1>
+        <p className="mt-1 text-[15px] text-moss-600">Temporary. These move into Settings later. Open Home to watch the effect.</p>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {buttons.map(([kind, label]) => (
-          <button
-            key={kind}
-            onClick={() => inject(kind)}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm hover:bg-slate-700"
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {latest && (
-        <div className="text-lg font-semibold">
-          {latest.activeChannel} · {latest.linkState} · FSO signal {latest.fso.rssi}
+      <Panel title="Scenarios" index={1} right={<Pill tone={scenario === 'clear' ? 'ok' : 'warn'}>Active: {scenario}</Pill>}>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {controls.map((c) => (
+            <button key={c.kind} onClick={() => inject(c.kind)}
+              className="rounded-xl border border-forest-900/15 bg-mint-50 p-3.5 text-left transition-colors hover:border-leaf-500 hover:bg-mint-200">
+              <div className="font-display text-lg font-semibold">{c.label}</div>
+              <div className="text-[13px] text-moss-600">{c.hint}</div>
+            </button>
+          ))}
         </div>
-      )}
+      </Panel>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <pre className="max-h-96 overflow-auto rounded-xl border border-slate-800 bg-slate-900 p-4 text-xs">
-          {latest ? JSON.stringify(latest, null, 2) : 'Waiting for data...'}
-        </pre>
-        <ul className="max-h-96 space-y-1 overflow-auto rounded-xl border border-slate-800 bg-slate-900 p-4 text-sm">
-          {events.length === 0 && <li className="text-slate-500">No events yet</li>}
-          {[...events].reverse().map((e) => (
-            <li key={e.id}>
-              <span className="text-slate-500">{format(e.ts, 'hh:mm:ss a')}</span>{' '}
-              <span
-                className={
-                  e.severity === 'Critical'
-                    ? 'text-red-400'
-                    : e.severity === 'Warning'
-                      ? 'text-amber-400'
-                      : 'text-sky-400'
-                }
-              >
-                [{e.severity}]
-              </span>{' '}
-              {e.message}
+      <Panel title="Recent events" index={2}>
+        <ul className="max-h-80 space-y-1.5 overflow-auto text-sm">
+          {events.length === 0 && <li className="text-moss-600">No events yet</li>}
+          {[...events].reverse().slice(0, 30).map((e) => (
+            <li key={e.id} className="flex gap-3">
+              <span className="font-mono text-moss-600">{format(e.ts, 'HH:mm:ss')}</span>
+              <span className={`w-16 shrink-0 font-semibold ${tone[e.severity]}`}>{e.severity}</span>
+              <span>{e.message}</span>
             </li>
           ))}
         </ul>
-      </div>
+      </Panel>
     </div>
   )
 }

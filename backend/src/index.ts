@@ -2,47 +2,109 @@ import 'dotenv/config'
 import express from 'express'
 import http from 'http'
 import cors from 'cors'
+import { randomUUID } from 'node:crypto'
 import { Server } from 'socket.io'
 import { createSimulator } from './simulator.js'
-import type { LinkEvent, Reading } from './types.js'
+import { createStore } from './store.js'
+import { loadSettings, sanitize, saveSettings } from './settings.js'
+import type { LinkEvent, PacketRecord, Reading, Settings } from './types.js'
 
 const TICK_MS = 1000
 const MAX_READINGS = 120
-const MAX_EVENTS = 100
+const MAX_PACKETS = 200
 const ORIGINS = process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:5173', 'http://127.0.0.1:5173']
+
+async function main() {
+let settings: Settings = loadSettings()
+const store = await createStore()
 
 const app = express()
 app.use(cors({ origin: ORIGINS }))
 app.use(express.json())
 
 const readings: Reading[] = []
-const events: LinkEvent[] = []
+const packets: PacketRecord[] = []
+let scenario = 'clear'
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', time: new Date().toISOString() }))
 app.get('/api/latest', (_req, res) => res.json(readings.at(-1) ?? null))
+app.get('/api/history', (req, res) => {
+  const minutes = Math.min(1440, Math.max(1, Number(req.query.minutes) || 60))
+  res.json({ samples: store.history(minutes), persistence: store.persistence })
+})
 
 const server = http.createServer(app)
 const io = new Server(server, { cors: { origin: ORIGINS } })
-const sim = createSimulator()
+const sim = createSimulator(() => settings)
+
+function emitEvent(severity: LinkEvent['severity'], type: string, message: string) {
+  const e: LinkEvent = { id: randomUUID(), ts: Date.now(), severity, type, message }
+  store.addEvent(e)
+  io.emit('event', e)
+}
 
 io.on('connection', (socket) => {
   console.log('Dashboard connected:', socket.id)
-  socket.emit('init', { readings, events, source: 'simulator' })
+  socket.emit('init', {
+    readings, events: store.events, packets, runs: store.runs, activeRun: store.activeRun(),
+    settings, scenario, source: 'simulator', persistence: store.persistence,
+  })
+
   socket.on('sim:inject', (kind) => sim.inject(kind))
+
+  socket.on('settings:update', (patch) => {
+    if (typeof patch !== 'object' || patch === null) return
+    settings = sanitize(patch as Partial<Settings>, settings)
+    saveSettings(settings)
+    io.emit('settings', settings)
+  })
+
+  socket.on('run:start', (p: { distanceM?: unknown; notes?: unknown }) => {
+    const distanceM = Math.min(100000, Math.max(0, Number(p?.distanceM) || 0))
+    const notes = typeof p?.notes === 'string' ? p.notes.slice(0, 200) : ''
+    const run = store.startRun(distanceM, notes)
+    if (!run) return
+    emitEvent('Info', 'run', `Test run started at ${distanceM} m`)
+    io.emit('run:active', run)
+  })
+
+  socket.on('run:stop', async () => {
+    const done = await store.stopRun()
+    if (!done) return
+    emitEvent('Info', 'run', `Test run stopped: ${done.samples} s, average RSSI ${done.avgRssi.toFixed(1)}`)
+    io.emit('run:active', null)
+    io.emit('run:done', done)
+  })
+
   socket.on('disconnect', () => console.log('Dashboard disconnected:', socket.id))
 })
 
 setInterval(() => {
-  const { reading, newEvents } = sim.step()
+  const step = sim.step()
+  const { reading } = step
   readings.push(reading)
   if (readings.length > MAX_READINGS) readings.shift()
+  store.addReading(reading)
+  const live = store.updateRun(reading)
+
   io.emit('reading', reading)
-  for (const e of newEvents) {
-    events.push(e)
-    if (events.length > MAX_EVENTS) events.shift()
+  for (const e of step.events) {
+    store.addEvent(e)
     io.emit('event', e)
   }
+  packets.push(...step.packets)
+  if (packets.length > MAX_PACKETS) packets.splice(0, packets.length - MAX_PACKETS)
+  io.emit('packets', step.packets)
+
+  if (step.scenario !== scenario) {
+    scenario = step.scenario
+    io.emit('scenario', scenario)
+  }
+  if (live) io.emit('run:active', live)
 }, TICK_MS)
 
 const PORT = process.env.PORT || 4000
 server.listen(PORT, () => console.log(`Backend running on port ${PORT}`))
+}
+
+void main()
