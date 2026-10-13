@@ -15,9 +15,9 @@ export const screens = {
     title: 'Home',
     subtitle: 'Is the link working right now?',
     blocks: [
-      { title: 'Active channel', hint: 'FSO or RF, large and color-coded', kind: 'kpi', span: 4 },
+      { title: 'Active channel', hint: 'FSO or LoRa, large and color-coded', kind: 'kpi', span: 4 },
       { title: 'Link state', hint: 'Searching, Aligning, Locked, Degraded, Failover, Re-acquiring', kind: 'kpi', span: 4 },
-      { title: 'Overall status', hint: 'Normal, Degraded, Emergency (RF fallback) or Offline', kind: 'kpi', span: 4 },
+      { title: 'Overall status', hint: 'Normal, Degraded, Emergency (LoRa fallback) or Offline', kind: 'kpi', span: 4 },
       { title: 'FSO signal strength', hint: 'RSSI gauge with failover and lock marks', kind: 'gauge', span: 4 },
       { title: 'Unit A → Unit B', hint: 'Connection, bitrate, latency, jitter, packet loss', kind: 'table', span: 4 },
       { title: 'Unit B → Unit A', hint: 'Connection, bitrate, latency, jitter, packet loss', kind: 'table', span: 4 },
@@ -39,10 +39,10 @@ export const screens = {
   },
   link: {
     title: 'Link Details',
-    subtitle: 'FSO and RF metrics, and the packet log',
+    subtitle: 'FSO and LoRa metrics, and the packet log',
     blocks: [
       { title: 'FSO metrics', hint: 'RSSI, SNR, BER before and after FEC, frame loss, laser and receiver status', kind: 'table', span: 4 },
-      { title: 'RF (LoRa) metrics', hint: 'RSSI, SNR, hop channel, hop sync, retransmissions, codec, encryption', kind: 'table', span: 4 },
+      { title: 'LoRa metrics', hint: 'RSSI, SNR, hop channel, hop sync, retransmissions, codec, encryption', kind: 'table', span: 4 },
       { title: 'Transfer counters', hint: 'Frames sent, received, lost; bytes and live bitrate per direction', kind: 'table', span: 4 },
       { title: 'Packet log', hint: 'Timestamp, direction, channel, sequence, size, CRC/FEC result, status', kind: 'table', span: 12, height: 'lg' },
     ],
@@ -62,9 +62,9 @@ export const screens = {
     title: 'Security',
     subtitle: 'Encryption, tamper and jamming indicators',
     blocks: [
-      { title: 'Encryption status', hint: 'Per channel (FSO and RF)', kind: 'kpi', span: 4 },
+      { title: 'Encryption status', hint: 'Per channel (FSO and LoRa)', kind: 'kpi', span: 4 },
       { title: 'Failed decryptions', hint: 'Authentication and decryption failures', kind: 'kpi', span: 4 },
-      { title: 'RF jamming', hint: 'Noise floor and loss across hop channels', kind: 'kpi', span: 4 },
+      { title: 'System jamming', hint: 'Noise floor and loss across hop channels', kind: 'kpi', span: 4 },
       { title: 'Tamper alerts', hint: 'Timestamp and unit', kind: 'table', span: 6 },
       { title: 'Beam interruption events', hint: 'Obstruction events with duration', kind: 'table', span: 6 },
     ],
@@ -87,7 +87,7 @@ export const screens = {
     subtitle: 'Thresholds, failover mode, calibration, demo mode',
     blocks: [
       { title: 'Failover thresholds', hint: 'RSSI and packet-loss limits with hysteresis', kind: 'form', span: 6 },
-      { title: 'Failover mode', hint: 'Auto, Force FSO or Force RF', kind: 'form', span: 6 },
+      { title: 'Failover mode', hint: 'Auto, Force FSO or Force LoRa', kind: 'form', span: 6 },
       { title: 'Calibration', hint: 'RSSI scaling and ambient-light baseline', kind: 'form', span: 6 },
       { title: 'Test and demo mode', hint: 'Inject packet loss, simulate fog, block the beam', kind: 'form', span: 6 },
     ],

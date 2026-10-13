@@ -5,6 +5,7 @@ import { useLink, BACKEND_URL } from '../store/link'
 import { useNow } from '../hooks/useNow'
 import Panel from '../components/Panel'
 import Gauge from '../components/Gauge'
+import MessagesPanel from '../components/MessagesPanel'
 import { Bar, Big, Pill, Row, SourceTag, Sub, toneFill, toneSolid, type Tone } from '../components/ui'
 import { LINK_STATES, activeAlerts, assessLink, commLabels, formatDuration, type CommLevel } from '../lib/linkStatus'
 import type { Direction, LinkState, Settings, UnitStatus } from '../types'
@@ -34,7 +35,7 @@ function Header() {
     <div className="rise flex flex-wrap items-end justify-between gap-3" style={idx(0)}>
       <div>
         <h1 className="text-3xl font-bold">Home</h1>
-        <p className="mt-1 text-[15px] text-moss-600">Is the link working right now?</p>
+        <p className="mt-1 text-[15px] text-moss-600">Is the link working, and are the messages getting through?</p>
       </div>
       <SourceTag />
     </div>
@@ -85,6 +86,9 @@ function BatteryPanel({ name, u, s, age, index }: { name: string; u: UnitStatus;
 export default function Home() {
   const latest = useLink((s) => s.latest)
   const events = useLink((s) => s.events)
+  const messages = useLink((s) => s.messages)
+  const filtered = useLink((s) => s.filtered)
+  const totals = useLink((s) => s.totals)
   const connected = useLink((s) => s.connected)
   const settings = useLink((s) => s.settings)
   const now = useNow()
@@ -115,6 +119,7 @@ export default function Home() {
   const alerts = activeAlerts(events, latest.ts)
   const alertTone: Tone = alerts.count === 0 ? 'ok' : alerts.worst?.severity === 'Critical' ? 'crit' : 'warn'
   const session = latest.session
+  const lastMessage = messages.at(-1)
   const sinceFailover = session.lastFailoverTs ? (latest.ts - session.lastFailoverTs) / 1000 : null
 
   return (
@@ -150,11 +155,17 @@ export default function Home() {
           <Sub>{comm.note}</Sub>
           <div className="mt-3">
             <Row label="Last reading" value={`${age}s ago`} tone={age > 5 ? 'crit' : 'default'} />
+            <Row label="Last message" value={lastMessage ? `Unit ${lastMessage.to} · ${formatDuration((latest.ts - lastMessage.ts) / 1000)} ago` : 'None yet'} />
+            <Row label="Messages received" value={`A ${totals.A.received} · B ${totals.B.received}`} />
           </div>
         </Panel>
 
-        {/* Row 2: signal strength and the two data paths */}
-        <Panel title="FSO signal strength" tone={zoneTone} index={4} className="lg:col-span-4"
+        {/* Row 2: what each unit received (the point of the system) */}
+        <MessagesPanel unit="A" messages={messages} filtered={filtered} totals={totals.A} now={latest.ts} index={4} />
+        <MessagesPanel unit="B" messages={messages} filtered={filtered} totals={totals.B} now={latest.ts} index={5} />
+
+        {/* Row 3: signal strength and the two data paths */}
+        <Panel title="FSO signal strength" tone={zoneTone} index={6} className="lg:col-span-4"
           right={<Pill tone={zoneTone}>{zone === 'locked' ? 'Above lock' : zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
           <Gauge value={f.rssi} fail={settings.failBelow} lock={settings.lockAbove} />
           <div className="mt-3">
@@ -163,14 +174,14 @@ export default function Home() {
           </div>
         </Panel>
 
-        <DirectionPanel title="Unit A → Unit B" from="A" to="B" icon={ArrowRight} d={latest.ab} index={5} />
-        <DirectionPanel title="Unit B → Unit A" from="B" to="A" icon={ArrowLeft} d={latest.ba} index={6} />
+        <DirectionPanel title="Unit A → Unit B" from="A" to="B" icon={ArrowRight} d={latest.ab} index={7} />
+        <DirectionPanel title="Unit B → Unit A" from="B" to="A" icon={ArrowLeft} d={latest.ba} index={8} />
 
-        {/* Row 3: batteries, session, alerts */}
-        <BatteryPanel name="A" u={latest.units.A} s={settings} age={age} index={7} />
-        <BatteryPanel name="B" u={latest.units.B} s={settings} age={age} index={8} />
+        {/* Row 4: batteries, session, alerts */}
+        <BatteryPanel name="A" u={latest.units.A} s={settings} age={age} index={9} />
+        <BatteryPanel name="B" u={latest.units.B} s={settings} age={age} index={10} />
 
-        <Panel title="Session" index={9} className="lg:col-span-3">
+        <Panel title="Session" index={11} className="lg:col-span-3">
           <Big mono size="md">{formatDuration(session.uptimeSec)}</Big>
           <Sub>System uptime</Sub>
           <div className="mt-3">
@@ -189,7 +200,7 @@ export default function Home() {
           </div>
         </Panel>
 
-        <Panel title="Active alerts" tone={alertTone} index={10} className="lg:col-span-3">
+        <Panel title="Active alerts" tone={alertTone} index={12} className="lg:col-span-3">
           <Big mono tone={alertTone}>{alerts.count}</Big>
           <Sub>{alerts.worst ? `Most severe: ${alerts.worst.severity}` : 'No alerts in the last 5 minutes'}</Sub>
           <ul className="mt-3 space-y-2">

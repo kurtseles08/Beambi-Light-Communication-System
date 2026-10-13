@@ -10,12 +10,15 @@ const idx = (i: number) => ({ '--i': i }) as CSSProperties
 const controls: { kind: Inject; label: string; hint: string }[] = [
   { kind: 'fog', label: 'Fog', hint: 'Gradual signal loss until you clear it' },
   { kind: 'dust', label: 'Dust or haze', hint: 'Milder gradual loss, low humidity' },
-  { kind: 'drift', label: 'Beam drift', hint: 'Slow misalignment, signal creeps down' },
+  { kind: 'drift', label: 'Beam drift', hint: 'The mount slowly creeps off target. Re-aim it on Alignment' },
   { kind: 'obstruction', label: 'Block the beam', hint: 'Sudden signal loss for 12 s' },
   { kind: 'glare', label: 'Strong sunlight', hint: 'Ambient light disturbs the receiver' },
   { kind: 'lossburst', label: 'Packet-loss burst', hint: '15 s of lost frames' },
   { kind: 'tamper', label: 'Tamper alert', hint: 'A unit enclosure is opened' },
   { kind: 'lowbattery', label: 'Low battery', hint: 'Unit A drops to the warning level' },
+  { kind: 'message', label: 'Send a message', hint: 'A voice message from Unit A or Unit B' },
+  { kind: 'stutter', label: 'Stuttered voice', hint: 'Broken audio that must be rejected, never shown as a message' },
+  { kind: 'noise', label: 'Ambient noise', hint: 'Background sound that must be ignored' },
   { kind: 'clear', label: 'Clear', hint: 'Back to normal conditions' },
 ]
 

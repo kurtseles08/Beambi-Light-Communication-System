@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom'
 import Layout from './components/Layout'
 import Screen from './components/Screen'
 import Home from './pages/Home'
+import Alignment from './pages/Alignment'
 import DisasterStatus from './pages/DisasterStatus'
 import LiveDebug from './pages/LiveDebug'
 
@@ -10,7 +11,7 @@ export default function App() {
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<Home />} />
-        <Route path="alignment" element={<Screen id="alignment" />} />
+        <Route path="alignment" element={<Alignment />} />
         <Route path="link" element={<Screen id="link" />} />
         <Route path="disaster" element={<DisasterStatus />} />
         <Route path="environment" element={<Screen id="environment" />} />

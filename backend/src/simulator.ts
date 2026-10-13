@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { createVoice } from './voice.js'
 import type {
-  Channel, Direction, Inject, LinkEvent, LinkState, PacketRecord, Reading, Settings, Severity,
+  AimCommand, Channel, Direction, Inject, LinkEvent, LinkState, PacketRecord, Reading, Settings, Severity,
 } from './types.js'
 
 export type Scenario = 'clear' | 'fog' | 'dust' | 'obstruction' | 'glare' | 'lossburst' | 'drift'
 
 const BASE_RSSI = 82 // what the simulated optics deliver in clear air
+const AIM_SIGMA = 2 // steps. At 2 steps off target the signal is about 60% of its best (same value in the frontend)
 const FRAME = {
   FSO: { perTick: 25, size: 256, kbps: 64 },
   RF: { perTick: 6, size: 48, kbps: 12 },
@@ -30,7 +32,10 @@ export function createSimulator(getSettings: () => Settings) {
   let nextAuto = randInt(45, 75)
   let atten = 0 // 0..1 gradual attenuation (fog, dust)
   let glare = 0 // 0..1 strong ambient light
-  let drift = 0 // 0..1 slow misalignment (wind, vibration)
+  let manual = { pan: 0, tilt: 0 } // mount offset set by the operator, in steps
+  let driftAmt = 0 // extra offset that builds slowly during the drift scenario
+  let driftAngle = 0
+  const pendingNotes: { severity: Severity; type: string; message: string }[] = []
   let humidity = 68
 
   let channel: Channel = 'RF'
@@ -54,11 +59,14 @@ export function createSimulator(getSettings: () => Settings) {
   const tamperUntil = { A: 0, B: 0 }
   const pendingTamper: ('A' | 'B')[] = []
   const dirs = { ab: freshCounters(), ba: freshCounters() }
+  const voice = createVoice()
 
-  function start(next: Scenario, duration: number) {
+  function begin(next: Scenario, endsAt: number) {
     scenario = next
-    scenarioEndsAt = tick + duration
+    scenarioEndsAt = endsAt
+    if (next === 'drift') driftAngle = Math.random() * Math.PI * 2
   }
+  const start = (next: Scenario, duration: number) => begin(next, tick + duration)
 
   function step() {
     tick++
@@ -70,6 +78,7 @@ export function createSimulator(getSettings: () => Settings) {
       events.push({ id: randomUUID(), ts, severity, type, message, ...extra })
 
     if (tick === 1) addEvent('Info', 'system', 'Simulator started')
+    for (const n of pendingNotes.splice(0)) addEvent(n.severity, n.type, n.message)
 
     if (s.mode !== prevMode) {
       addEvent('Info', 'mode', `Operating mode set to ${MODE_LABEL[s.mode]}`)
@@ -94,13 +103,17 @@ export function createSimulator(getSettings: () => Settings) {
 
     atten += clamp((scenario === 'fog' ? 0.85 : scenario === 'dust' ? 0.45 : 0) - atten, -0.04, 0.04)
     glare += clamp((scenario === 'glare' ? 1 : 0) - glare, -0.12, 0.12)
-    // Drift builds slowly (about 0.8 RSSI points per second) and is fixed quickly once cleared
-    drift += clamp((scenario === 'drift' ? 0.5 : 0) - drift, -0.05, 0.01)
+    // The mount drifts off target slowly (about 0.05 step per second) and snaps back once cleared
+    driftAmt += clamp((scenario === 'drift' ? 3 : 0) - driftAmt, -0.15, 0.05)
+    const pan = manual.pan + Math.cos(driftAngle) * driftAmt
+    const tilt = manual.tilt + Math.sin(driftAngle) * driftAmt
+    // Beam pointing: full signal on target, falling off smoothly as the aim moves away
+    const aimGain = Math.exp(-(pan * pan + tilt * tilt) / (2 * AIM_SIGMA * AIM_SIGMA))
     // A big solar panel collects much more stray light than a small photodiode
     const g = glare * (s.receiver === 'solar-panel' ? 1 : 0.4)
 
     // --- Optical signal. Fog is gradual, obstruction is sudden, glare adds noise.
-    let signal = (BASE_RSSI + 6 * Math.sin(tick / 14) + noise(2 + 9 * g)) * (1 - atten) * (1 - 0.12 * g) * (1 - drift)
+    let signal = (BASE_RSSI + 6 * Math.sin(tick / 14) + noise(2 + 9 * g)) * (1 - atten) * (1 - 0.12 * g) * aimGain
     if (scenario === 'obstruction') signal = 3 + Math.random() * 3
     signal = clamp(signal, 0, 100)
 
@@ -137,7 +150,7 @@ export function createSimulator(getSettings: () => Settings) {
             : scenario === 'glare' ? 'Strong ambient light interference'
               : scenario === 'lossburst' ? 'Packet-loss burst'
                 : scenario === 'drift' ? 'Beam drift (misalignment)'
-                  : signal < s.failBelow ? 'Low signal (possible misalignment)' : 'High frame loss'
+                  : aimGain < 0.7 ? 'Mount out of alignment' : signal < s.failBelow ? 'Low signal (possible misalignment)' : 'High frame loss'
     const bad = signal < s.failBelow || fsoLoss > s.maxFrameLoss
     const healthy = signal > s.lockAbove && fsoLoss <= s.maxFrameLoss / 2
 
@@ -235,13 +248,25 @@ export function createSimulator(getSettings: () => Settings) {
     const ba = direction('ba', clamp(signal + noise(4), 0, 100), 'B→A')
 
     // --- Security: light interference and heavy attenuation corrupt frames
-    const pFail = 0.01 + g * 0.3 + (atten > 0.5 ? 0.05 : 0) + (scenario === 'lossburst' ? 0.1 : 0)
-    if (Math.random() < pFail) {
-      failedDecryptions++
-      if (failedDecryptions % 10 === 0) {
+    const addFailed = (n: number) => {
+      const before = failedDecryptions
+      failedDecryptions += n
+      if (Math.floor(failedDecryptions / 10) > Math.floor(before / 10)) {
         addEvent('Warning', 'decrypt-fail', `${failedDecryptions} frames have failed decryption this session`)
       }
     }
+    const pFail = 0.01 + g * 0.3 + (atten > 0.5 ? 0.05 : 0) + (scenario === 'lossburst' ? 0.1 : 0)
+    if (Math.random() < pFail) addFailed(1)
+
+    // Voice messages between the units: only what passes the encryption check becomes a message
+    const talk = voice.step({
+      tick, ts, channel, rssi: signal, snr, lossAB: ab.packetLoss, lossBA: ba.packetLoss,
+      latAB: ab.latencyMs, latBA: ba.latencyMs,
+      repairRate: (onFso ? clamp((s.lockAbove - signal) * 0.6 + 3, 2, 40) : 3) / 100,
+      cipher: 'AES-256-GCM',
+    })
+    if (talk.failedFrames) addFailed(talk.failedFrames)
+    for (const f of talk.filtered) if (f.kind === 'stutter') addEvent('Warning', 'message-rejected', f.detail)
     if (s.autoScenarios && Math.random() < 1 / 500) pendingTamper.push(Math.random() < 0.5 ? 'A' : 'B')
     for (const unit of pendingTamper.splice(0)) {
       tamperUntil[unit] = tick + 20
@@ -286,13 +311,14 @@ export function createSimulator(getSettings: () => Settings) {
         temperatureC: r1(30 + 2 * Math.sin(tick / 300) + noise(0.1)),
         humidityPct: r1(clamp(humidity + noise(0.4), 0, 100)),
       },
+      aim: { pan: r2(pan), tilt: r2(tilt) },
       security: {
         cipher: 'AES-256-GCM', fsoEncrypted: true, rfEncrypted: true,
         failedDecryptions, framesAuthenticated: dirs.ab.recv + dirs.ba.recv,
       },
       session: { uptimeSec: Math.floor((ts - startTs) / 1000), failovers, lastFailoverTs, lastFailoverReason },
     }
-    return { reading, events, packets, scenario }
+    return { reading, events, packets, scenario, messages: talk.messages, filtered: talk.filtered }
   }
 
   // Demo controls
@@ -303,9 +329,12 @@ export function createSimulator(getSettings: () => Settings) {
       case 'glare': scenario = 'glare'; scenarioEndsAt = Infinity; break
       case 'obstruction': start('obstruction', 12); break
       case 'lossburst': start('lossburst', 15); break
-      case 'drift': scenario = 'drift'; scenarioEndsAt = Infinity; break
+      case 'drift': begin('drift', Infinity); break
       case 'clear': scenario = 'clear'; nextAuto = tick + randInt(45, 75); break
       case 'tamper': pendingTamper.push(Math.random() < 0.5 ? 'A' : 'B'); break
+      case 'message': voice.trigger('message'); break
+      case 'noise': voice.trigger('noise'); break
+      case 'stutter': voice.trigger('stutter'); break
       case 'lowbattery': {
         const s = getSettings()
         batteryA = s.lowBatteryPct - 0.05 // just under the warning level, so the alert fires on the next tick
@@ -315,5 +344,24 @@ export function createSimulator(getSettings: () => Settings) {
     }
   }
 
-  return { step, inject }
+  // Alignment practice: nudge, re-center, or knock the mount off target
+  function aim(cmd: AimCommand) {
+    const lim = (v: number) => clamp(v, -6, 6)
+    if (cmd.reset) {
+      manual = { pan: 0, tilt: 0 }
+      pendingNotes.push({ severity: 'Info', type: 'aim', message: 'Mount re-centered (simulated)' })
+    } else if (cmd.bump) {
+      const a = Math.random() * Math.PI * 2
+      const m = 1.8 + Math.random() * 0.8
+      manual = { pan: lim(manual.pan + Math.cos(a) * m), tilt: lim(manual.tilt + Math.sin(a) * m) }
+      pendingNotes.push({ severity: 'Warning', type: 'aim', message: 'Mount knocked out of alignment (simulated)' })
+    } else {
+      manual = {
+        pan: lim(manual.pan + clamp(Number(cmd.dPan) || 0, -1, 1)),
+        tilt: lim(manual.tilt + clamp(Number(cmd.dTilt) || 0, -1, 1)),
+      }
+    }
+  }
+
+  return { step, inject, aim }
 }

@@ -7,14 +7,14 @@ import { Server } from 'socket.io'
 import { createSimulator } from './simulator.js'
 import { createStore } from './store.js'
 import { loadSettings, sanitize, saveSettings } from './settings.js'
-import type { LinkEvent, PacketRecord, Reading, Settings } from './types.js'
+import type { AimCommand, FilteredEvent, LinkEvent, MessageRecord, PacketRecord, Reading, Settings, UnitId, UnitTotals } from './types.js'
 
 const TICK_MS = 1000
 const MAX_READINGS = 120
 const MAX_PACKETS = 200
+const MAX_MESSAGES = 200
 const ORIGINS = process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:5173', 'http://127.0.0.1:5173']
 
-async function main() {
 let settings: Settings = loadSettings()
 const store = await createStore()
 
@@ -24,6 +24,10 @@ app.use(express.json())
 
 const readings: Reading[] = []
 const packets: PacketRecord[] = []
+const messages: MessageRecord[] = []
+const filtered: FilteredEvent[] = []
+const fresh = (): UnitTotals => ({ received: 0, accuracySum: 0, stutter: 0, ambient: 0 })
+const totals: Record<UnitId, UnitTotals> = { A: fresh(), B: fresh() }
 let scenario = 'clear'
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', time: new Date().toISOString() }))
@@ -46,11 +50,14 @@ function emitEvent(severity: LinkEvent['severity'], type: string, message: strin
 io.on('connection', (socket) => {
   console.log('Dashboard connected:', socket.id)
   socket.emit('init', {
-    readings, events: store.events, packets, runs: store.runs, activeRun: store.activeRun(),
+    readings, events: store.events, packets, messages, filtered, totals, runs: store.runs, activeRun: store.activeRun(),
     settings, scenario, source: 'simulator', persistence: store.persistence,
   })
 
   socket.on('sim:inject', (kind) => sim.inject(kind))
+  socket.on('sim:aim', (cmd) => {
+    if (typeof cmd === 'object' && cmd !== null) sim.aim(cmd as AimCommand)
+  })
 
   socket.on('settings:update', (patch) => {
     if (typeof patch !== 'object' || patch === null) return
@@ -92,6 +99,20 @@ setInterval(() => {
     store.addEvent(e)
     io.emit('event', e)
   }
+  for (const m of step.messages) {
+    messages.push(m)
+    if (messages.length > MAX_MESSAGES) messages.shift()
+    totals[m.to].received++
+    totals[m.to].accuracySum += m.accuracy
+    io.emit('message', m)
+  }
+  for (const f of step.filtered) {
+    filtered.push(f)
+    if (filtered.length > MAX_MESSAGES) filtered.shift()
+    totals[f.to][f.kind]++
+    io.emit('filtered', f)
+  }
+  if (step.messages.length || step.filtered.length) io.emit('totals', totals)
   packets.push(...step.packets)
   if (packets.length > MAX_PACKETS) packets.splice(0, packets.length - MAX_PACKETS)
   io.emit('packets', step.packets)
@@ -105,6 +126,3 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 4000
 server.listen(PORT, () => console.log(`Backend running on port ${PORT}`))
-}
-
-void main()
