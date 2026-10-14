@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "failBelow": 30,
-  "lockAbove": 90,
+  "lockAbove": 60,
   "failDelaySec": 2,
   "recoverHoldSec": 5,
   "maxFrameLoss": 25,
