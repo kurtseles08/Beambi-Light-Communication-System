@@ -8,6 +8,8 @@ import { createSimulator } from './simulator.js'
 import { createStore } from './store.js'
 import { loadSettings, sanitize, saveSettings } from './settings.js'
 import type { AimCommand, FilteredEvent, LinkEvent, MessageRecord, PacketRecord, Reading, Settings, UnitId, UnitTotals } from './types.js'
+import { createHardware, type UnitReport } from './hardware.js'
+
 
 const TICK_MS = 1000
 const MAX_READINGS = 120
@@ -18,9 +20,29 @@ const ORIGINS = process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:5173',
 let settings: Settings = loadSettings()
 const store = await createStore()
 
+const SOURCE = process.env.DATA_SOURCE === 'hardware' ? 'hardware' : 'simulator'
+const hw = createHardware(() => settings)
+
+
 const app = express()
 app.use(cors({ origin: ORIGINS }))
 app.use(express.json())
+
+app.post('/api/telemetry', (req, res) => {
+  const key = process.env.DEVICE_KEY
+  if (key && req.get('x-api-key') !== key) {
+    res.status(401).json({ error: 'bad key' })
+    return
+  }
+  const b = req.body as Partial<UnitReport> | undefined
+  if (!b || (b.unit !== 'A' && b.unit !== 'B') || typeof b.rssi !== 'number' || !Number.isFinite(b.rssi)) {
+    res.status(400).json({ error: 'need unit (A or B) and a numeric rssi' })
+    return
+  }
+  hw.ingest(b as UnitReport)
+  res.json({ ok: true })
+})
+
 
 const readings: Reading[] = []
 const packets: PacketRecord[] = []
@@ -51,13 +73,13 @@ io.on('connection', (socket) => {
   console.log('Dashboard connected:', socket.id)
   socket.emit('init', {
     readings, events: store.events, packets, messages, filtered, totals, runs: store.runs, activeRun: store.activeRun(),
-    settings, scenario, source: 'simulator', persistence: store.persistence,
+    settings, scenario, source: 'SOURCE', persistence: store.persistence,
   })
 
-  socket.on('sim:inject', (kind) => sim.inject(kind))
-  socket.on('sim:aim', (cmd) => {
-    if (typeof cmd === 'object' && cmd !== null) sim.aim(cmd as AimCommand)
-  })
+socket.on('sim:inject', (kind) => { if (SOURCE === 'simulator') sim.inject(kind) })
+socket.on('sim:aim', (cmd) => {
+  if (SOURCE === 'simulator' && typeof cmd === 'object' && cmd !== null) sim.aim(cmd as AimCommand)
+})
 
   socket.on('settings:update', (patch) => {
     if (typeof patch !== 'object' || patch === null) return
@@ -87,7 +109,8 @@ io.on('connection', (socket) => {
 })
 
 setInterval(() => {
-  const step = sim.step()
+  const step = SOURCE === 'hardware' ? hw.step() : sim.step()
+if (!step) return
   const { reading } = step
   readings.push(reading)
   if (readings.length > MAX_READINGS) readings.shift()
@@ -126,3 +149,4 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 4000
 server.listen(PORT, () => console.log(`Backend running on port ${PORT}`))
+
