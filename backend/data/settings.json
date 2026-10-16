@@ -1,15 +1,15 @@
 {
-  "mode": "auto",
+  "mode": "rf",
   "failBelow": 30,
-  "lockAbove": 60,
+  "lockAbove": 50,
   "failDelaySec": 2,
   "recoverHoldSec": 5,
   "maxFrameLoss": 25,
-  "clearRssi": 75,
-  "ambientWarnLux": 43000,
+  "clearRssi": 82,
+  "ambientWarnLux": 20000,
   "ambientCritLux": 50000,
-  "lowBatteryPct": 20,
+  "lowBatteryPct": 15,
   "critBatteryPct": 10,
   "receiver": "solar-panel",
-  "autoScenarios": true
+  "autoScenarios": false
 }
