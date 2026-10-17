@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLink, BACKEND_URL } from '../store/link'
 import { useNow } from '../hooks/useNow'
+import { useDevice } from '../device/deviceStore'
 import Panel from '../components/Panel'
 import Gauge from '../components/Gauge'
 import MessagesPanel from '../components/MessagesPanel'
@@ -83,6 +84,32 @@ function BatteryPanel({ name, u, s, age, index }: { name: string; u: UnitStatus;
   )
 }
 
+// Hardware mode only: what the real unit knows about its LoRa peer
+function LoraSummary({ index }: { index: number }) {
+  const d = useDevice((s) => s.device)
+  const linked = useDevice((s) => s.deviceConnected)
+  if (!linked || !d) {
+    return (
+      <Panel title="Device" tone="crit" index={index} className="lg:col-span-8">
+        <Big stencil size="md" tone="crit">Disconnected</Big>
+        <Sub>No data from the ESP32. Check the USB cable and SERIAL_PATH.</Sub>
+      </Panel>
+    )
+  }
+  const heard = d.lora.peer !== '-' && d.lora.ageS >= 0
+  const stale = !heard || d.lora.ageS > 10
+  const tone: Tone = !d.lora.ok ? 'crit' : stale ? 'warn' : 'ok'
+  return (
+    <Panel title="LoRa backup" tone={tone} index={index} className="lg:col-span-8"
+      right={<Pill tone={tone}>{!d.lora.ok ? 'Module failed' : stale ? 'No peer' : 'Peer online'}</Pill>}>
+      <Row label="Peer" value={heard ? `Unit ${d.lora.peer}` : 'Not heard yet'} />
+      <Row label="Peer laser" value={heard ? (d.lora.peerLaser ? 'Up' : 'Down') : 'Unknown'} />
+      <Row label="Last heard" value={d.lora.ageS < 0 ? 'Never' : `${d.lora.ageS}s ago`} tone={stale ? 'warn' : 'default'} />
+      <Row label="Signal" value={heard ? `${d.lora.rssi} dBm · ${d.lora.snr} dB` : 'Unknown'} />
+    </Panel>
+  )
+}
+
 export default function Home() {
   const latest = useLink((s) => s.latest)
   const events = useLink((s) => s.events)
@@ -91,7 +118,9 @@ export default function Home() {
   const totals = useLink((s) => s.totals)
   const connected = useLink((s) => s.connected)
   const settings = useLink((s) => s.settings)
+  const source = useLink((s) => s.source)
   const now = useNow()
+  const hw = source === 'hardware'
 
   if (!latest) {
     return (
@@ -121,6 +150,7 @@ export default function Home() {
   const session = latest.session
   const lastMessage = messages.at(-1)
   const sinceFailover = session.lastFailoverTs ? (latest.ts - session.lastFailoverTs) / 1000 : null
+  const span = hw ? 'lg:col-span-6' : 'lg:col-span-3'
 
   return (
     <div className="space-y-6">
@@ -155,33 +185,55 @@ export default function Home() {
           <Sub>{comm.note}</Sub>
           <div className="mt-3">
             <Row label="Last reading" value={`${age}s ago`} tone={age > 5 ? 'crit' : 'default'} />
-            <Row label="Last message" value={lastMessage ? `Unit ${lastMessage.to} · ${formatDuration((latest.ts - lastMessage.ts) / 1000)} ago` : 'None yet'} />
-            <Row label="Messages received" value={`A ${totals.A.received} · B ${totals.B.received}`} />
+            {!hw && (
+              <>
+                <Row label="Last message" value={lastMessage ? `Unit ${lastMessage.to} · ${formatDuration((latest.ts - lastMessage.ts) / 1000)} ago` : 'None yet'} />
+                <Row label="Messages received" value={`A ${totals.A.received} · B ${totals.B.received}`} />
+              </>
+            )}
           </div>
         </Panel>
 
-        {/* Row 2: what each unit received (the point of the system) */}
-        <MessagesPanel unit="A" messages={messages} filtered={filtered} totals={totals.A} now={latest.ts} index={4} />
-        <MessagesPanel unit="B" messages={messages} filtered={filtered} totals={totals.B} now={latest.ts} index={5} />
+        {/* Row 2: simulated voice messages (simulator only) */}
+        {!hw && (
+          <>
+            <MessagesPanel unit="A" messages={messages} filtered={filtered} totals={totals.A} now={latest.ts} index={4} />
+            <MessagesPanel unit="B" messages={messages} filtered={filtered} totals={totals.B} now={latest.ts} index={5} />
+          </>
+        )}
 
-        {/* Row 3: signal strength and the two data paths */}
+        {/* Row 3: signal strength and the data paths */}
         <Panel title="FSO signal strength" tone={zoneTone} index={6} className="lg:col-span-4"
           right={<Pill tone={zoneTone}>{zone === 'locked' ? 'Above lock' : zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
           <Gauge value={f.rssi} fail={settings.failBelow} lock={settings.lockAbove} />
-          <div className="mt-3">
-            <Row label="SNR" value={`${f.snr.toFixed(1)} dB`} />
-            <Row label="Frame loss" value={`${f.frameLoss.toFixed(1)}%`} tone={f.frameLoss > settings.maxFrameLoss ? 'crit' : 'default'} />
-          </div>
+          {hw ? (
+            <Sub>Derived from the receiver envelope and the link threshold.</Sub>
+          ) : (
+            <div className="mt-3">
+              <Row label="SNR" value={`${f.snr.toFixed(1)} dB`} />
+              <Row label="Frame loss" value={`${f.frameLoss.toFixed(1)}%`} tone={f.frameLoss > settings.maxFrameLoss ? 'crit' : 'default'} />
+            </div>
+          )}
         </Panel>
 
-        <DirectionPanel title="Unit A → Unit B" from="A" to="B" icon={ArrowRight} d={latest.ab} index={7} />
-        <DirectionPanel title="Unit B → Unit A" from="B" to="A" icon={ArrowLeft} d={latest.ba} index={8} />
+        {hw ? (
+          <LoraSummary index={7} />
+        ) : (
+          <>
+            <DirectionPanel title="Unit A → Unit B" from="A" to="B" icon={ArrowRight} d={latest.ab} index={7} />
+            <DirectionPanel title="Unit B → Unit A" from="B" to="A" icon={ArrowLeft} d={latest.ba} index={8} />
+          </>
+        )}
 
-        {/* Row 4: batteries, session, alerts */}
-        <BatteryPanel name="A" u={latest.units.A} s={settings} age={age} index={9} />
-        <BatteryPanel name="B" u={latest.units.B} s={settings} age={age} index={10} />
+        {/* Row 4: batteries (simulator only), session, alerts */}
+        {!hw && (
+          <>
+            <BatteryPanel name="A" u={latest.units.A} s={settings} age={age} index={9} />
+            <BatteryPanel name="B" u={latest.units.B} s={settings} age={age} index={10} />
+          </>
+        )}
 
-        <Panel title="Session" index={11} className="lg:col-span-3">
+        <Panel title="Session" index={11} className={span}>
           <Big mono size="md">{formatDuration(session.uptimeSec)}</Big>
           <Sub>System uptime</Sub>
           <div className="mt-3">
@@ -200,7 +252,7 @@ export default function Home() {
           </div>
         </Panel>
 
-        <Panel title="Active alerts" tone={alertTone} index={12} className="lg:col-span-3">
+        <Panel title="Active alerts" tone={alertTone} index={12} className={span}>
           <Big mono tone={alertTone}>{alerts.count}</Big>
           <Sub>{alerts.worst ? `Most severe: ${alerts.worst.severity}` : 'No alerts in the last 5 minutes'}</Sub>
           <ul className="mt-3 space-y-2">

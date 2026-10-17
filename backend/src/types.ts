@@ -183,3 +183,60 @@ export type Run = {
   failovers: number
   lockedPct: number
 }
+
+
+
+
+
+
+
+
+
+
+
+
+// ---- Firmware (ESP32) interface ----
+export type DeviceStatus = {
+  t: 'status'
+  unit: UnitId
+  up: number            // firmware uptime, s
+  laser: 0 | 1          // debounced laser link
+  env: number           // receiver envelope 0..1
+  thr: number           // link threshold
+  mode: 0 | 1 | 2       // 0 AUTO, 1 force LASER, 2 force LORA
+  failover: 0 | 1       // 1 = LoRa is the active path
+  tx: number            // TX source 0..4
+  rx: number            // RX sink 0..2
+  vol: number
+  rxGain: number
+  micGain: number
+  duck: 0 | 1
+  gate: 0 | 1
+  micP2P: number
+  panP2P: number
+  workAvg: number       // us
+  workMax: number       // us
+  over: number
+  cal: 0 | 1            // calibrating now
+  lora: {
+    ok: 0 | 1
+    peer: string        // '-' = nobody heard yet
+    peerLaser: 0 | 1
+    ageS: number        // seconds since peer heard, -1 = never
+    rssi: number
+    snr: number
+    tx: number
+    rx: number
+  }
+  ts?: number           // added by backend
+}
+
+export type LoraMessage = { id: string; ts: number; from: string; rssi: number; snr: number; text: string }
+export type PongRecord = { id: string; ts: number; from: string; seq: string; rssi: number; snr: number }
+
+export type DeviceCommand =
+  | { cmd: 'set'; k: 'txSrc' | 'rxSink' | 'vol' | 'rxGain' | 'micGain' | 'duck' | 'gate'; v: number }
+  | { cmd: 'mode'; v: 0 | 1 | 2 }
+  | { cmd: 'cal' }
+  | { cmd: 'ping' }
+  | { cmd: 'msg'; text: string }

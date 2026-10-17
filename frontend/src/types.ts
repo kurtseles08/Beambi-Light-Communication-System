@@ -183,3 +183,49 @@ export type Run = {
   failovers: number
   lockedPct: number
 }
+
+// ---- Firmware (ESP32) interface ----
+export type DeviceStatus = {
+  t: 'status'
+  unit: UnitId
+  up: number
+  laser: 0 | 1
+  env: number
+  thr: number
+  mode: 0 | 1 | 2
+  failover: 0 | 1
+  tx: number
+  rx: number
+  vol: number
+  rxGain: number
+  micGain: number
+  duck: 0 | 1
+  gate: 0 | 1
+  micP2P: number
+  panP2P: number
+  workAvg: number
+  workMax: number
+  over: number
+  cal: 0 | 1
+  lora: {
+    ok: 0 | 1
+    peer: string
+    peerLaser: 0 | 1
+    ageS: number
+    rssi: number
+    snr: number
+    tx: number
+    rx: number
+  }
+  ts?: number
+}
+
+export type LoraMessage = { id: string; ts: number; from: string; rssi: number; snr: number; text: string }
+export type PongRecord = { id: string; ts: number; from: string; seq: string; rssi: number; snr: number }
+
+export type DeviceCommand =
+  | { cmd: 'set'; k: 'txSrc' | 'rxSink' | 'vol' | 'rxGain' | 'micGain' | 'duck' | 'gate'; v: number }
+  | { cmd: 'mode'; v: 0 | 1 | 2 }
+  | { cmd: 'cal' }
+  | { cmd: 'ping' }
+  | { cmd: 'msg'; text: string }
