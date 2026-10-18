@@ -7,12 +7,8 @@ export const DEFAULT_SETTINGS: Settings = {
   lockAbove: 50,
   failDelaySec: 2,
   recoverHoldSec: 5,
-  maxFrameLoss: 25,
   clearRssi: 82,
-  ambientWarnLux: 20000,
-  ambientCritLux: 50000,
   lowBatteryPct: 20,
   critBatteryPct: 10,
   receiver: 'solar-panel',
-  autoScenarios: true,
 }

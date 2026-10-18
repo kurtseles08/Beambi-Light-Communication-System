@@ -139,14 +139,10 @@ export type Settings = {
   lockAbove: number // "Locked" at or above this; also the recovery level
   failDelaySec: number
   recoverHoldSec: number
-  maxFrameLoss: number // % frame loss that also triggers failover
   clearRssi: number // calibration: RSSI in clear air
-  ambientWarnLux: number
-  ambientCritLux: number
   lowBatteryPct: number
   critBatteryPct: number
   receiver: Receiver
-  autoScenarios: boolean
 }
 
 // One history point every 5 s
@@ -231,3 +227,21 @@ export type DeviceCommand =
   | { cmd: 'cal' }
   | { cmd: 'ping' }
   | { cmd: 'msg'; text: string }
+
+
+  // A spoken message: what Unit X sent, and what the other unit's receiver actually got
+export type VoiceRecord = {
+  id: string
+  seq: number
+  ts: number
+  from: UnitId // transmitter
+  to: UnitId // receiver
+  sent: string // full text at the transmitter
+  received: string // text at the receiver. ··· marks words that did not arrive
+  durationSec: number
+  accuracy: number // % of the message time the receiver had the laser
+  samples: number // receiver reports used
+  signal: number | null // average receiver signal 0-100
+  source: 'speech' | 'typed'
+  autoScenarios: boolean
+}

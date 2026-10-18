@@ -1,11 +1,10 @@
 import { useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crosshair } from 'lucide-react'
 import { useLink, BACKEND_URL } from '../store/link'
 import Panel from '../components/Panel'
 import RssiBars from '../components/RssiBars'
 import { Big, Pill, Row, SourceTag, Sub, toneFill, toneText, type Tone } from '../components/ui'
-import { AIM_SIGMA, aimRadius, coach, evaluateAlignment, type Alignment as AlignmentData } from '../lib/alignment'
+import { coach, evaluateAlignment, type Alignment as AlignmentData } from '../lib/alignment'
 import { beepHz, useBeep } from '../hooks/useBeep'
 
 const idx = (i: number) => ({ '--i': i }) as CSSProperties
@@ -60,38 +59,13 @@ function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
   )
 }
 
-// Top-down view of the receiver. The dot is where the beam lands. Simulation only.
-function AimTarget({ pan, tilt, lockR, failR }: { pan: number; tilt: number; lockR: number; failR: number }) {
-  const S = 22 // pixels per step
-  const x = clamp(100 + pan * S, 8, 192)
-  const y = clamp(100 - tilt * S, 8, 192)
-  return (
-    <svg viewBox="0 0 200 200" role="img" aria-label={`Beam is ${pan.toFixed(1)} steps right and ${tilt.toFixed(1)} steps up from the receiver`} className="mx-auto w-full max-w-[14rem]">
-      <circle cx="100" cy="100" r="96" className="fill-crit/10 stroke-forest-900/15" />
-      <circle cx="100" cy="100" r={Math.min(96, failR * S)} className="fill-warn/20" />
-      <circle cx="100" cy="100" r={Math.min(96, lockR * S)} className="fill-ok/25" />
-      <line x1="4" y1="100" x2="196" y2="100" className="stroke-forest-900/25" strokeDasharray="3 4" />
-      <line x1="100" y1="4" x2="100" y2="196" className="stroke-forest-900/25" strokeDasharray="3 4" />
-      <circle cx="100" cy="100" r="3" className="fill-forest-900/40" />
-      <circle cx={x} cy={y} r="8" className="fill-forest-900 stroke-white transition-all duration-300" strokeWidth="3" />
-    </svg>
-  )
-}
-
-function StatPanel({ a, snr, loss, lux, hw, index, className }: { a: AlignmentData; snr: number; loss: number; lux: number; hw: boolean; index: number; className: string }) {
+function StatPanel({ a, index, className }: { a: AlignmentData; index: number; className: string }) {
   return (
     <Panel title="Last 60 seconds" index={index} className={className}>
       <Row label="Best (peak)" value={a.peak.toFixed(1)} />
       <Row label="Average" value={a.avg.toFixed(1)} />
       <Row label="Lowest" value={a.min.toFixed(1)} />
       <Row label="Time at or above lock" value={`${a.aboveLockPct.toFixed(0)}%`} tone={a.aboveLockPct >= 90 ? 'ok' : a.aboveLockPct >= 50 ? 'warn' : 'crit'} />
-      {!hw && (
-        <>
-          <Row label="Signal quality (SNR)" value={`${snr.toFixed(1)} dB`} />
-          <Row label="Frame loss" value={`${loss.toFixed(1)}%`} tone={loss > 5 ? 'warn' : 'default'} />
-          <Row label="Ambient light" value={`${lux.toLocaleString('en-US')} lx`} />
-        </>
-      )}
     </Panel>
   )
 }
@@ -101,12 +75,9 @@ export default function Alignment() {
   const connected = useLink((s) => s.connected)
   const settings = useLink((s) => s.settings)
   const updateSettings = useLink((s) => s.updateSettings)
-  const aim = useLink((s) => s.aim)
-  const source = useLink((s) => s.source)
 
   const [beepOn, setBeepOn] = useState(false)
   const [volume, setVolume] = useState(0.5)
-  const [coarse, setCoarse] = useState(false)
 
   const a = useMemo(() => evaluateAlignment(readings, settings), [readings, settings])
   useBeep(beepOn, a?.rssi ?? null, volume)
@@ -126,19 +97,14 @@ export default function Alignment() {
     )
   }
 
-  const latest = readings[readings.length - 1]
   const zoneTone: Tone = a.zone === 'locked' ? 'ok' : a.zone === 'marginal' ? 'warn' : 'crit'
   const advice = coach(a)
-  const step = coarse ? 0.5 : 0.1
-  const third = latest.aim ? 'lg:col-span-4' : 'lg:col-span-6'
-  const nudgeBtn = 'grid h-11 w-11 place-items-center rounded-lg border border-forest-900/15 bg-mint-50 text-forest-800 transition-colors hover:border-leaf-500 hover:bg-mint-200 active:bg-mint-200'
 
   return (
     <div className="space-y-6">
       <Header />
 
       <div className="grid gap-5 lg:grid-cols-12">
-        {/* Row 1: the four things asked for */}
         <Panel title="Live RSSI" tone={zoneTone} index={1} className="lg:col-span-4"
           right={<Pill tone={zoneTone}>{a.zone === 'locked' ? 'Above lock' : a.zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
           <Big mono tone={zoneTone}>{a.rssi.toFixed(1)}</Big>
@@ -165,7 +131,6 @@ export default function Alignment() {
             <Row label="Margin to lock" value={`${signed(a.margin)} pts`} tone={a.margin >= 0 ? 'ok' : a.zone === 'marginal' ? 'warn' : 'crit'} />
             <Row label="Change (per 10 s)" value={`${signed(a.slopePer10s)} pts`} tone={a.drifting ? 'warn' : 'default'} />
             <Row label="Stability" value={`${a.stability} (\u03c3 ${a.sigma.toFixed(1)})`} tone={a.stability === 'Stable' ? 'default' : a.stability === 'Fluctuating' ? 'warn' : 'crit'} />
-            {source !== 'hardware' && <Row label="Light at receiver" value={latest.fso.rxPresent ? 'Detected' : 'None'} tone={latest.fso.rxPresent ? 'default' : 'crit'} />}
           </div>
         </Panel>
 
@@ -204,7 +169,6 @@ export default function Alignment() {
           </div>
         </Panel>
 
-        {/* Row 2: the trend, tall */}
         <Panel title="RSSI trend, last 60 seconds" index={4} className="lg:col-span-12"
           right={
             <div className="hidden items-center gap-3 text-xs text-moss-600 sm:flex">
@@ -216,8 +180,7 @@ export default function Alignment() {
           <RssiBars readings={readings} fail={settings.failBelow} lock={settings.lockAbove} height={400} />
         </Panel>
 
-        {/* Row 3: help while aiming */}
-        <Panel title="Aiming guide" tone={advice.tone} index={5} className={third}>
+        <Panel title="Aiming guide" tone={advice.tone} index={5} className="lg:col-span-6">
           <div className={`font-display text-3xl font-bold leading-tight ${toneText[advice.tone]}`}>{advice.title}</div>
           <p className="mt-2 text-[15px] leading-snug">{advice.text}</p>
           <div className="mt-4">
@@ -236,44 +199,7 @@ export default function Alignment() {
           </div>
         </Panel>
 
-        {latest.aim && (
-          <Panel title="Aiming practice" index={6} className={third} right={<Pill tone="warn">Simulation</Pill>}>
-            <AimTarget pan={latest.aim.pan} tilt={latest.aim.tilt}
-              lockR={aimRadius(settings.lockAbove, settings.clearRssi)} failR={aimRadius(settings.failBelow, settings.clearRssi)} />
-            <p className="mt-2 text-center font-mono text-[13px] text-moss-600">
-              Pan {signed(latest.aim.pan)} · Tilt {signed(latest.aim.tilt)} steps
-            </p>
-
-            <div className="mt-3 flex items-center justify-center gap-3">
-              <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Nudge the aim">
-                <span />
-                <button className={nudgeBtn} onClick={() => aim({ dTilt: step })} aria-label="Nudge up"><ArrowUp size={18} /></button>
-                <span />
-                <button className={nudgeBtn} onClick={() => aim({ dPan: -step })} aria-label="Nudge left"><ArrowLeft size={18} /></button>
-                <button className={nudgeBtn} onClick={() => aim({ reset: true })} aria-label="Re-center" title="Re-center"><Crosshair size={18} /></button>
-                <button className={nudgeBtn} onClick={() => aim({ dPan: step })} aria-label="Nudge right"><ArrowRight size={18} /></button>
-                <span />
-                <button className={nudgeBtn} onClick={() => aim({ dTilt: -step })} aria-label="Nudge down"><ArrowDown size={18} /></button>
-                <span />
-              </div>
-              <div className="flex flex-col gap-2 text-sm">
-                <button onClick={() => setCoarse(!coarse)} aria-pressed={coarse}
-                  className="rounded-lg border border-forest-900/15 bg-mint-50 px-3 py-1.5 font-medium transition-colors hover:bg-mint-200">
-                  Step: {coarse ? 'Coarse' : 'Fine'}
-                </button>
-                <button onClick={() => aim({ bump: true })}
-                  className="rounded-lg border border-warn bg-warn/15 px-3 py-1.5 font-medium text-warn-ink transition-colors hover:bg-warn/25">
-                  Knock the mount
-                </button>
-              </div>
-            </div>
-            <p className="mt-3 text-center text-xs text-moss-600">
-              Dot = where the beam lands. Rings: green locked, amber marginal. Real hardware cannot show this offset (sigma {AIM_SIGMA} steps).
-            </p>
-          </Panel>
-        )}
-
-        <StatPanel a={a} snr={latest.fso.snr} loss={latest.fso.frameLoss} lux={latest.fso.ambientLux} hw={source === 'hardware'} index={7} className={third} />
+        <StatPanel a={a} index={6} className="lg:col-span-6" />
       </div>
     </div>
   )

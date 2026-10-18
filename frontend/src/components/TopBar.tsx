@@ -81,7 +81,7 @@ export default function TopBar({ pinned, onTogglePin }: Props) {
       <div className="flex flex-wrap items-center gap-2">
         <Indicator to="/" label="Link" value={commLabels[link]} level={linkLamp[link]} />
         <Indicator to="/disaster" label="Hazard" value={hazard.label} level={hazardLamp[hazard.level]} />
-        <Indicator to="/debug" label="Data" value={dataValue} level={dataLevel} />
+        <Indicator to="/hardware" label="Data" value={dataValue} level={dataLevel} />
       </div>
     </header>
   )

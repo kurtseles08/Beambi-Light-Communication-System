@@ -1,13 +1,8 @@
 import type { Reading, Settings } from '../types'
 
 // Same value as the simulator. One step is a small mount adjustment.
-export const AIM_SIGMA = 2
 
 // How many steps off target the signal falls to a given level (used to draw the target rings)
-export function aimRadius(level: number, clearRssi: number) {
-  if (level >= clearRssi) return 0
-  return Math.sqrt(-2 * AIM_SIGMA * AIM_SIGMA * Math.log(level / clearRssi))
-}
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
 

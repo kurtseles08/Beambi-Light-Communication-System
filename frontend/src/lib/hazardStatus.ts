@@ -3,12 +3,6 @@ import type { Quake } from './earthquakes'
 
 export type Level = 'unknown' | 'normal' | 'watch' | 'warning'
 
-export const levelStyles: Record<Level, string> = {
-  unknown: 'border-slate-700 bg-slate-800 text-slate-300',
-  normal: 'border-emerald-700 bg-emerald-500/10 text-emerald-300',
-  watch: 'border-amber-600 bg-amber-500/10 text-amber-300',
-  warning: 'border-red-600 bg-red-500/10 text-red-300',
-}
 
 const order: Level[] = ['unknown', 'normal', 'watch', 'warning']
 const higher = (a: Level, b: Level): Level => (order.indexOf(a) >= order.indexOf(b) ? a : b)
