@@ -11,6 +11,9 @@ import { Bar, Big, Pill, Row, SourceTag, Sub, toneFill, toneSolid, type Tone } f
 import { LINK_STATES, activeAlerts, assessLink, commLabels, formatDuration, type CommLevel } from '../lib/linkStatus'
 import type { Direction, LinkState, Settings, UnitStatus } from '../types'
 
+
+import VoiceMessagePanel from '../components/VoiceMessagePanel'
+
 const idx = (i: number) => ({ '--i': i }) as CSSProperties
 
 const MODE_LABEL = { auto: 'Auto', fso: 'Force FSO', rf: 'Force RF' } as const
@@ -206,6 +209,7 @@ export default function Home() {
         </Panel>
 
         {/* Row 2: simulated voice messages (simulator only) */}
+        {hw && <VoiceMessagePanel index={4} />}
         {!hw && (
           <>
             <MessagesPanel unit="A" messages={messages} filtered={filtered} totals={totals.A} now={latest.ts} index={4} />

@@ -6,7 +6,10 @@ import type {
   LoraMessage,
   PongRecord,
   UnitId,
+  VoiceRecord,
 } from "../types";
+
+
 
 const URL: string = import.meta.env.VITE_BACKEND_URL ?? "http://localhost:4000";
 const TOKEN: string = import.meta.env.VITE_COMMAND_TOKEN ?? "";
@@ -29,6 +32,7 @@ type DeviceState = {
   loraLog: LoraMessage[];
   pongs: PongRecord[];
   lastError: string | null;
+  voice: VoiceRecord[];
 };
 
 type InitPayload = {
@@ -40,6 +44,7 @@ type InitPayload = {
   canCommand?: boolean;
   loraLog?: LoraMessage[];
   pongs?: PongRecord[];
+  voice?: VoiceRecord[];
 };
 
 export const useDevice = create<DeviceState>(() => ({
@@ -55,6 +60,7 @@ export const useDevice = create<DeviceState>(() => ({
   loraLog: [],
   pongs: [],
   lastError: null,
+  voice: [],
 }));
 
 const socket = io(URL, { auth: { token: TOKEN } });
@@ -72,6 +78,7 @@ socket.on("init", (p: InitPayload) =>
     canCommand: !!p.canCommand,
     loraLog: p.loraLog ?? [],
     pongs: p.pongs ?? [],
+    voice: p.voice ?? [],
   }),
 );
 socket.on("device", (d: DeviceStatus) => set({ device: d }));
@@ -86,6 +93,9 @@ socket.on("lora:msg", (m: LoraMessage) =>
 socket.on("lora:pong", (p: PongRecord) =>
   set((s) => ({ pongs: [...s.pongs, p].slice(-100) })),
 );
+socket.on("voice:msg", (m: VoiceRecord) =>
+  set((s) => ({ voice: [...s.voice, m].slice(-100) })),
+);
 socket.on("device:ack", (a: { ok: boolean; error?: string }) =>
   set({ lastError: a.ok ? null : (a.error ?? "failed") }),
 );
@@ -96,3 +106,14 @@ export const setApplyBoth = (v: boolean) => set({ applyBoth: v });
 // target: "A", "B" or "both". Left out, the backend uses its shown unit.
 export const sendCommand = (c: DeviceCommand, target?: CommandTarget) =>
   socket.emit("device:command", c, target);
+
+
+
+
+// Tell the backend a message was spoken at unit `from`. It works out what the other unit received.
+export const sendVoice = (
+  from: UnitId,
+  text: string,
+  durationMs: number,
+  source: "speech" | "typed",
+) => socket.emit("voice:message", { from, text, durationMs, source });
