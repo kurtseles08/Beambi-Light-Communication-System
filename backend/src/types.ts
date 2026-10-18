@@ -199,6 +199,8 @@ export type Run = {
 export type DeviceStatus = {
   t: 'status'
   unit: UnitId
+  batV?: number         // battery volts, -1 when no battery is wired
+  batPct?: number       // battery percent, -1 when unknown
   up: number            // firmware uptime, s
   laser: 0 | 1          // debounced laser link
   env: number           // receiver envelope 0..1

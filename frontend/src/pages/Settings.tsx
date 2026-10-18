@@ -7,6 +7,10 @@ import Panel from '../components/Panel'
 import { Big, Pill, Row, SourceTag, Sub, toneSolid, type Tone } from '../components/ui'
 import { DEFAULT_SETTINGS } from '../lib/defaults'
 import type { Inject, Mode, Receiver, Settings as SettingsType } from '../types'
+import { sendCommand } from '../device/deviceStore'
+
+
+
 
 const idx = (i: number) => ({ '--i': i }) as CSSProperties
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
@@ -15,7 +19,7 @@ const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.l
 // ---------- small controls ----------
 
 function Slider({ label, hint, value, min, max, step = 1, unit = '', onChange }: {
-  label: string; hint: string; value: number; min: number; max: number; step?: number; unit?: string; onChange: (v: number) => void
+  label: string; hint: string; value: number; min: number; max: number; step?: number; unit?: string; onChange?: (v: number) => void
 }) {
   const id = useId()
   return (
@@ -25,7 +29,8 @@ function Slider({ label, hint, value, min, max, step = 1, unit = '', onChange }:
         <span className="font-mono text-lg font-medium tabular-nums">{value.toLocaleString('en-US')}{unit}</span>
       </div>
       <input id={id} type="range" min={min} max={Math.max(min, max)} step={step} value={value}
-        onChange={(e) => onChange(Number(e.target.value))} className="mt-1.5 w-full accent-leaf-600" />
+        onChange={onChange ? (e) => onChange(Number(e.target.value)) : undefined} disabled={!onChange}
+        className="mt-1.5 w-full accent-leaf-600" />
       <p className="mt-1 text-[13px] leading-snug text-moss-600">{hint}</p>
     </div>
   )
@@ -142,6 +147,7 @@ export default function Settings() {
   }, [sent])
 
   const sim = source === 'simulator'
+  const hw = source === 'hardware'
   const rssi = latest ? latest.fso.rssi : null
   const rssiAvg10 = readings.length ? mean(readings.slice(-10).map((r) => r.fso.rssi)) : null
 
@@ -156,7 +162,10 @@ export default function Settings() {
     setSent(label)
   }
 
-  const manual = s.mode !== 'auto'
+   // On real hardware the unit itself holds the mode (0 auto, 1 laser, 2 LoRa)
+  const mode: Mode = hw && latest ? latest.mode : s.mode
+  const manual = mode !== 'auto'
+  const pickMode = (m: Mode) => (hw ? sendCommand({ cmd: 'mode', v: m === 'auto' ? 0 : m === 'fso' ? 1 : 2 }) : update({ mode: m }))
   const recent = events.slice(-4).reverse()
 
   return (
@@ -179,23 +188,29 @@ export default function Settings() {
         {/* Failover thresholds */}
         <Panel title="Failover thresholds" index={1} className="lg:col-span-6"
           right={<button className={ghostBtn} onClick={() => patchKeys(['failBelow', 'lockAbove', 'failDelaySec', 'recoverHoldSec', 'maxFrameLoss'])}><RotateCcw size={14} /> Defaults</button>}>
+          
+          
+          
           <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
           <div className="mt-3">
-            <Slider label="Failover below (RSSI)" value={s.failBelow} min={5} max={Math.min(80, s.lockAbove - 5)}
-              hint="If the signal stays under this, the link switches to LoRa."
-              onChange={(v) => update({ failBelow: v })} />
-            <Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={Math.max(10, s.failBelow + 5)} max={95}
-              hint="The link counts as Locked above this, and the laser is trusted again."
-              onChange={(v) => update({ lockAbove: v })} />
-            <Slider label="Failover delay" value={s.failDelaySec} min={1} max={30} unit=" s"
-              hint="How long the signal must stay low before switching. Avoids switching on a brief dip."
-              onChange={(v) => update({ failDelaySec: v })} />
-            <Slider label="Recovery hold" value={s.recoverHoldSec} min={1} max={60} unit=" s"
-              hint="How long the signal must stay good before going back to the laser."
-              onChange={(v) => update({ recoverHoldSec: v })} />
-            <Slider label="Packet-loss limit" value={s.maxFrameLoss} min={5} max={90} unit="%"
-              hint="Frame loss above this also triggers a failover, even if RSSI looks fine."
-              onChange={(v) => update({ maxFrameLoss: v })} />
+            <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
+            </div>
+<div className="mt-3">
+  <Slider label="Failover below (RSSI)" value={s.failBelow} min={5} max={Math.min(80, s.lockAbove - 5)}
+    hint="If the signal stays under this, the link switches to LoRa."
+    onChange={!hw ? (v) => update({ failBelow: v }) : undefined} />
+  <Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={Math.max(10, s.failBelow + 5)} max={95}
+    hint="The link counts as Locked above this, and the laser is trusted again."
+    onChange={!hw ? (v) => update({ lockAbove: v }) : undefined} />
+  <Slider label="Failover delay" value={s.failDelaySec} min={1} max={30} unit=" s"
+    hint="How long the signal must stay low before switching. Avoids switching on a brief dip."
+    onChange={!hw ? (v) => update({ failDelaySec: v }) : undefined} />
+  <Slider label="Recovery hold" value={s.recoverHoldSec} min={1} max={60} unit=" s"
+    hint="How long the signal must stay good before going back to the laser."
+    onChange={!hw ? (v) => update({ recoverHoldSec: v }) : undefined} />
+  <Slider label="Packet-loss limit" value={s.maxFrameLoss} min={5} max={90} unit="%"
+    hint="Frame loss above this also triggers a failover, even if RSSI looks fine."
+    onChange={!hw ? (v) => update({ maxFrameLoss: v }) : undefined} />
           </div>
           <Row label="Hysteresis band" value={`${s.lockAbove - s.failBelow} pts`} />
           <p className="mt-2 text-[13px] leading-snug text-moss-600">
@@ -208,9 +223,9 @@ export default function Settings() {
           right={<Pill tone={manual ? 'warn' : 'ok'}>{manual ? 'Manual' : 'Automatic'}</Pill>}>
           <div role="radiogroup" aria-label="Failover mode" className="space-y-2.5">
             {MODES.map((m) => {
-              const on = s.mode === m.id
+              const on = mode === m.id
               return (
-                <button key={m.id} role="radio" aria-checked={on} onClick={() => update({ mode: m.id })}
+                <button key={m.id} role="radio" aria-checked={on}  onClick={() => pickMode(m.id)}
                   className={`flex w-full items-start gap-3 rounded-xl border p-3.5 text-left transition-colors ${
                     on ? 'border-forest-800 bg-mint-100' : 'border-forest-900/15 bg-white hover:bg-mint-50'}`}>
                   <span className={`mt-1 grid h-4 w-4 shrink-0 place-items-center rounded-full border-2 ${on ? 'border-forest-800' : 'border-forest-900/30'}`}>
@@ -311,7 +326,8 @@ export default function Settings() {
             </button>
             {sent && <span role="status" className="text-sm text-ok-ink">Sent: {sent}</span>}
           </div>
-
+        
+          {sim && (
           <div className="mt-4 flex items-center justify-between gap-3 border-t border-forest-900/10 pt-4">
             <div>
               <div className="font-medium">Random scenarios</div>
@@ -319,6 +335,7 @@ export default function Settings() {
             </div>
             <Switch on={s.autoScenarios} onChange={(v) => update({ autoScenarios: v })} label="Random scenarios" />
           </div>
+          )}
 
           <div className="mt-4 rounded-xl border border-forest-900/10 bg-mint-50 p-3">
             <div className="mb-2 flex items-baseline justify-between">

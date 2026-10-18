@@ -207,6 +207,8 @@ export type DeviceStatus = {
   workMax: number
   over: number
   cal: 0 | 1
+  batV?: number
+  batPct?: number
   lora: {
     ok: 0 | 1
     peer: string

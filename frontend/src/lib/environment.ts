@@ -87,7 +87,7 @@ export function evaluateEnvironment(readings: Reading[], s: Settings, rainMm: nu
   const secondsToFail = marginFail > 0 && rssiSlope < -0.2 ? marginFail / -rssiSlope : null
 
   let condition: Condition
-  let confidence: Confidence = 'medium'
+  let confidence: Confidence
   const reasons: string[] = []
 
   if (rssi < 8 || sudden) {

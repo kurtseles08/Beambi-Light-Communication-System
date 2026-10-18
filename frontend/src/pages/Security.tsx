@@ -8,6 +8,9 @@ import Panel from '../components/Panel'
 import { Big, Pill, Row, SourceTag, Sub, toneText, type Tone } from '../components/ui'
 import { formatDuration } from '../lib/linkStatus'
 import { NOISE_REF_DBM, evaluateJamming, failuresPerSecond, interruptions } from '../lib/security'
+import SecurityHardware from './SecurityHardware'
+
+
 
 const idx = (i: number) => ({ '--i': i }) as CSSProperties
 const signed = (v: number, d = 1) => `${v >= 0 ? '+' : '\u2212'}${Math.abs(v).toFixed(d)}`
@@ -52,7 +55,7 @@ function UnitTile({ unit, tampered }: { unit: string; tampered: boolean }) {
   )
 }
 
-export default function Security() {
+function SecuritySim() {
   const readings = useLink((s) => s.readings)
   const events = useLink((s) => s.events)
   const totals = useLink((s) => s.totals)
@@ -257,4 +260,9 @@ export default function Security() {
       </div>
     </div>
   )
+}
+
+export default function Security() {
+  const source = useLink((s) => s.source)
+  return source === 'hardware' ? <SecurityHardware /> : <SecuritySim />
 }

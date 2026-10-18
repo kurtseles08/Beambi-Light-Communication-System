@@ -78,16 +78,20 @@ function AimTarget({ pan, tilt, lockR, failR }: { pan: number; tilt: number; loc
   )
 }
 
-function StatPanel({ a, snr, loss, lux, index, className }: { a: AlignmentData; snr: number; loss: number; lux: number; index: number; className: string }) {
+function StatPanel({ a, snr, loss, lux, hw, index, className }: { a: AlignmentData; snr: number; loss: number; lux: number; hw: boolean; index: number; className: string }) {
   return (
     <Panel title="Last 60 seconds" index={index} className={className}>
       <Row label="Best (peak)" value={a.peak.toFixed(1)} />
       <Row label="Average" value={a.avg.toFixed(1)} />
       <Row label="Lowest" value={a.min.toFixed(1)} />
       <Row label="Time at or above lock" value={`${a.aboveLockPct.toFixed(0)}%`} tone={a.aboveLockPct >= 90 ? 'ok' : a.aboveLockPct >= 50 ? 'warn' : 'crit'} />
-      <Row label="Signal quality (SNR)" value={`${snr.toFixed(1)} dB`} />
-      <Row label="Frame loss" value={`${loss.toFixed(1)}%`} tone={loss > 5 ? 'warn' : 'default'} />
-      <Row label="Ambient light" value={`${lux.toLocaleString('en-US')} lx`} />
+      {!hw && (
+        <>
+          <Row label="Signal quality (SNR)" value={`${snr.toFixed(1)} dB`} />
+          <Row label="Frame loss" value={`${loss.toFixed(1)}%`} tone={loss > 5 ? 'warn' : 'default'} />
+          <Row label="Ambient light" value={`${lux.toLocaleString('en-US')} lx`} />
+        </>
+      )}
     </Panel>
   )
 }
@@ -98,6 +102,7 @@ export default function Alignment() {
   const settings = useLink((s) => s.settings)
   const updateSettings = useLink((s) => s.updateSettings)
   const aim = useLink((s) => s.aim)
+  const source = useLink((s) => s.source)
 
   const [beepOn, setBeepOn] = useState(false)
   const [volume, setVolume] = useState(0.5)
@@ -160,7 +165,7 @@ export default function Alignment() {
             <Row label="Margin to lock" value={`${signed(a.margin)} pts`} tone={a.margin >= 0 ? 'ok' : a.zone === 'marginal' ? 'warn' : 'crit'} />
             <Row label="Change (per 10 s)" value={`${signed(a.slopePer10s)} pts`} tone={a.drifting ? 'warn' : 'default'} />
             <Row label="Stability" value={`${a.stability} (\u03c3 ${a.sigma.toFixed(1)})`} tone={a.stability === 'Stable' ? 'default' : a.stability === 'Fluctuating' ? 'warn' : 'crit'} />
-            <Row label="Light at receiver" value={latest.fso.rxPresent ? 'Detected' : 'None'} tone={latest.fso.rxPresent ? 'default' : 'crit'} />
+            {source !== 'hardware' && <Row label="Light at receiver" value={latest.fso.rxPresent ? 'Detected' : 'None'} tone={latest.fso.rxPresent ? 'default' : 'crit'} />}
           </div>
         </Panel>
 
@@ -268,7 +273,7 @@ export default function Alignment() {
           </Panel>
         )}
 
-        <StatPanel a={a} snr={latest.fso.snr} loss={latest.fso.frameLoss} lux={latest.fso.ambientLux} index={7} className={third} />
+        <StatPanel a={a} snr={latest.fso.snr} loss={latest.fso.frameLoss} lux={latest.fso.ambientLux} hw={source === 'hardware'} index={7} className={third} />
       </div>
     </div>
   )

@@ -25,7 +25,7 @@ type Item = { to: string; label: string; icon: LucideIcon };
 
 const groups: { title: string; items: Item[] }[] = [
   {
-    title: "Cpu",
+    title: "Device",
     items: [{ to: "/hardware", label: "Hardware", icon: Cpu }],
   },
   {

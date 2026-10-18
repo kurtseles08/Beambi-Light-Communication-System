@@ -70,16 +70,27 @@ function DirectionPanel({ title, from, to, icon: Arrow, d, index }: {
   )
 }
 
-function BatteryPanel({ name, u, s, age, index }: { name: string; u: UnitStatus; s: Settings; age: number; index: number }) {
-  const tone: Tone = u.battery <= s.critBatteryPct ? 'crit' : u.battery <= s.lowBatteryPct ? 'warn' : 'ok'
+function BatteryPanel({ name, u, s, age, index, hw }: { name: string; u: UnitStatus; s: Settings; age: number; index: number; hw: boolean }) {
+  // Real hardware: an offline unit, or one with no battery wired, reports no battery value
+  const noData = hw && (!u.online || !(u.voltage > 0))
+  const tone: Tone = noData ? 'default' : u.battery <= s.critBatteryPct ? 'crit' : u.battery <= s.lowBatteryPct ? 'warn' : 'ok'
   return (
     <Panel title={`Unit ${name} battery`} tone={tone} index={index} className="lg:col-span-3">
-      <Big mono tone={tone}>{u.battery.toFixed(0)}%</Big>
-      <div className="mb-3 mt-4"><Bar pct={u.battery} tone={tone} /></div>
-      <Row label="Voltage" value={`${u.voltage.toFixed(2)} V`} />
-      <Row label="Status" value={u.online ? 'Online' : 'Offline'} tone={u.online ? 'ok' : 'crit'} />
-      <Row label="Last heard" value={`${age}s ago`} />
-      <Row label="Enclosure" value={u.tamper ? 'Tampered' : 'Secure'} tone={u.tamper ? 'crit' : 'default'} />
+      {noData ? (
+        <>
+          <Big mono>--</Big>
+          <Sub>{u.online ? 'No battery reading. Wire the voltage divider to GPIO34.' : `Unit ${name} is offline.`}</Sub>
+        </>
+      ) : (
+        <>
+          <Big mono tone={tone}>{u.battery.toFixed(0)}%</Big>
+          <div className="mb-3 mt-4"><Bar pct={u.battery} tone={tone} /></div>
+          <Row label="Voltage" value={`${u.voltage.toFixed(2)} V`} />
+          <Row label="Status" value={u.online ? 'Online' : 'Offline'} tone={u.online ? 'ok' : 'crit'} />
+          {!hw && <Row label="Last heard" value={`${age}s ago`} />}
+          {(!hw || u.tamper) && <Row label="Enclosure" value={u.tamper ? 'Tampered' : 'Secure'} tone={u.tamper ? 'crit' : 'default'} />}
+        </>
+      )}
     </Panel>
   )
 }
@@ -92,7 +103,7 @@ function LoraSummary({ index }: { index: number }) {
     return (
       <Panel title="Device" tone="crit" index={index} className="lg:col-span-8">
         <Big stencil size="md" tone="crit">Disconnected</Big>
-        <Sub>No data from the ESP32. Check the USB cable and SERIAL_PATH.</Sub>
+        <Sub>No reports from the unit shown on the Hardware page. Check its power, Wi-Fi and key (or the USB cable and SERIAL_PATH).</Sub>
       </Panel>
     )
   }
@@ -150,7 +161,7 @@ export default function Home() {
   const session = latest.session
   const lastMessage = messages.at(-1)
   const sinceFailover = session.lastFailoverTs ? (latest.ts - session.lastFailoverTs) / 1000 : null
-  const span = hw ? 'lg:col-span-6' : 'lg:col-span-3'
+  const span = 'lg:col-span-3'
 
   return (
     <div className="space-y-6">
@@ -228,8 +239,8 @@ export default function Home() {
         {/* Row 4: batteries (simulator only), session, alerts */}
         {!hw && (
           <>
-            <BatteryPanel name="A" u={latest.units.A} s={settings} age={age} index={9} />
-            <BatteryPanel name="B" u={latest.units.B} s={settings} age={age} index={10} />
+            <BatteryPanel name="A" u={latest.units.A} s={settings} age={age} index={9} hw={hw} />
+             <BatteryPanel name="B" u={latest.units.B} s={settings} age={age} index={10} hw={hw} />
           </>
         )}
 

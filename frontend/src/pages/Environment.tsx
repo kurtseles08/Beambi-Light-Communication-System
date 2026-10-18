@@ -10,6 +10,10 @@ import { Bar, Big, Pill, Row, SourceTag, Sub, toneSolid, type Tone } from '../co
 import {
   CONDITIONS, attenuationOf, conditionLabel, evaluateEnvironment, type Condition, type Trend,
 } from '../lib/environment'
+import EnvironmentHardware from './EnvironmentHardware'
+
+
+
 
 const idx = (i: number) => ({ '--i': i }) as CSSProperties
 
@@ -54,7 +58,7 @@ function SensorTile({ icon: Icon, label, value, tone = 'default' }: { icon: Luci
   )
 }
 
-export default function Environment() {
+function EnvironmentSim() {
   const readings = useLink((s) => s.readings)
   const connected = useLink((s) => s.connected)
   const settings = useLink((s) => s.settings)
@@ -212,5 +216,10 @@ export default function Environment() {
         </Panel>
       </div>
     </div>
-  )
+  ) 
+}
+
+export default function Environment() {
+  const source = useLink((s) => s.source)
+  return source === 'hardware' ? <EnvironmentHardware /> : <EnvironmentSim />
 }
