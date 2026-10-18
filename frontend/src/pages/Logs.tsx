@@ -48,24 +48,12 @@ function useHistory(minutes: number, everyMs: number) {
   return { samples, persistence, error }
 }
 
-// ---------- charts ----------
-
 const RANGES = [
   { minutes: 5, label: '5 min' },
   { minutes: 15, label: '15 min' },
   { minutes: 60, label: '1 hour' },
   { minutes: 1440, label: '24 hours' },
 ] as const
-
-type MetricId = 'rssi' | 'snr' | 'ber' | 'latency'
-const METRICS: { id: MetricId; label: string }[] = [
-  { id: 'rssi', label: 'RSSI' },
-  { id: 'snr', label: 'SNR' },
-  { id: 'ber', label: 'BER' },
-  { id: 'latency', label: 'Latency' },
-]
-
-const sci = (v: number) => v.toExponential(1).replace('e', '\u00d710^')
 
 function ChartTab({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
@@ -77,16 +65,23 @@ function ChartTab({ active, onClick, children }: { active: boolean; onClick: () 
   )
 }
 
-// ---------- event log ----------
-
 const SEV: Severity[] = ['Info', 'Warning', 'Critical']
 const sevTone: Record<Severity, Tone> = { Info: 'default', Warning: 'warn', Critical: 'crit' }
 const MAX_ROWS = 200
 const inputCls = 'rounded-lg border border-forest-900/15 bg-white px-3 py-1.5 text-sm text-forest-900 placeholder:text-moss-600/70'
-
-// ---------- page ----------
-
 const stamp = () => format(new Date(), 'yyyyMMdd-HHmmss')
+
+function Header({ children }: { children?: ReactNode }) {
+  return (
+    <div className="rise flex flex-wrap items-end justify-between gap-3" style={idx(0)}>
+      <div>
+        <h1 className="text-3xl font-bold">Logs &amp; Analytics</h1>
+        <p className="mt-1 text-[15px] text-moss-600">Event log, history, test runs and export.</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">{children}<SourceTag /></div>
+    </div>
+  )
+}
 
 export default function Logs() {
   const latest = useLink((s) => s.latest)
@@ -98,14 +93,7 @@ export default function Logs() {
   const startRun = useLink((s) => s.startRun)
   const stopRun = useLink((s) => s.stopRun)
 
-  const source = useLink((s) => s.source)
-  const hw = source === 'hardware'
-  const metrics = hw ? METRICS.filter((m) => m.id === 'rssi') : METRICS // the firmware measures only the signal
-
-
-
   const [range, setRange] = useState<number>(15)
-  const [metric, setMetric] = useState<MetricId>('rssi')
   const [scope, setScope] = useState<string>('session')
   const [distance, setDistance] = useState('100')
   const [notes, setNotes] = useState('')
@@ -132,27 +120,21 @@ export default function Logs() {
 
   // ----- which numbers the four summary panels show
   const picked: Run | null = scope === 'active' ? activeRun : runs.find((r) => r.id === scope) ?? null
-  const sent = latest.ab.framesSent + latest.ba.framesSent
-  const recv = latest.ab.framesReceived + latest.ba.framesReceived
 
   const sessionAvg = whole.samples.length ? mean(whole.samples.map((s) => s.rssi)) : null
   const avgRssi = picked ? (picked.samples ? picked.avgRssi : null) : sessionAvg
   const maxRange = picked ? picked.distanceM : runs.reduce((m, r) => Math.max(m, r.distanceM), 0)
-  const pdr = picked ? picked.pdr : sent ? (recv / sent) * 100 : 100
   const uptimeSec = picked ? (picked.samples * picked.lockedPct) / 100 : latest.session.uptimeSec
   const runSeconds = picked ? (picked.endedAt ? (picked.endedAt - picked.startedAt) / 1000 : picked.samples) : 0
   const scopeLabel = picked ? `${picked.distanceM} m run, ${format(picked.startedAt, 'd MMM HH:mm')}` : 'Whole session'
 
   const rssiTone: Tone = avgRssi === null ? 'default' : avgRssi >= settings.lockAbove ? 'ok' : avgRssi >= settings.failBelow ? 'warn' : 'crit'
-  const pdrTone: Tone = pdr >= 95 ? 'ok' : pdr >= 80 ? 'warn' : 'crit'
 
   // ----- chart data
   const rows = chart.samples
   const fmtTick = (t: number) => format(t, range <= 15 ? 'HH:mm:ss' : 'HH:mm')
-  const values = rows.map((s) => (metric === 'rssi' ? s.rssi : metric === 'snr' ? s.snr : metric === 'ber' ? s.berPost : s.latencyMs))
+  const values = rows.map((s) => s.rssi)
   const tick = { fill: TEXT, fontSize: 12 }
-  const tooltipStyle = { borderRadius: 12, border: '1px solid rgba(15,42,26,0.15)', fontSize: 13 }
-  const statFmt = (v: number) => (metric === 'ber' ? sci(v) : metric === 'latency' ? `${v.toFixed(0)} ms` : metric === 'snr' ? `${v.toFixed(1)} dB` : v.toFixed(1))
 
   // ----- event log
   const q = query.trim().toLowerCase()
@@ -165,10 +147,10 @@ export default function Logs() {
 
   const begin = () => startRun(Math.min(100000, Math.max(0, Number(distance) || 0)), notes.trim())
 
-    const exportHistory = () =>
+  const exportHistory = () =>
     downloadCsv(`beambi-history-${stamp()}.csv`,
-      ['time', 'channel', 'link_state', 'rssi', 'snr_db', 'ber_before_fec', 'ber_after_fec', 'latency_ms', 'bitrate_kbps', 'packet_loss_pct', 'ambient_lux', 'temperature_c', 'humidity_pct', 'battery_a_pct', 'battery_b_pct'],
-      rows.map((s) => [new Date(s.ts).toISOString(), s.ch, s.state, s.rssi.toFixed(1), s.snr.toFixed(1), s.berPre, s.berPost, s.latencyMs.toFixed(0), s.bitrateKbps.toFixed(1), s.loss.toFixed(1), Math.round(s.lux), s.tempC, s.hum, s.batA, s.batB]))
+      ['time', 'channel', 'link_state', 'rssi'],
+      rows.map((s) => [new Date(s.ts).toISOString(), s.ch, s.state, s.rssi.toFixed(1)]))
   const exportEvents = () =>
     downloadCsv(`beambi-events-${stamp()}.csv`,
       ['time', 'severity', 'type', 'unit', 'duration_s', 'message'],
@@ -214,20 +196,9 @@ export default function Logs() {
           <div className="mt-3"><Row label="Test runs" value={runs.length + (activeRun ? 1 : 0)} /></div>
         </Panel>
 
-        <Panel title="Packet delivery ratio" tone={hw ? 'default' : pdrTone} index={3} className="lg:col-span-3"
-          right={hw ? <Pill>Not measured</Pill> : <Pill tone={pdrTone}>{pdr >= 95 ? 'Good' : pdr >= 80 ? 'Fair' : 'Poor'}</Pill>}>
-          {hw ? (
-            <>
-              <Big mono>--</Big>
-              <Sub>The firmware does not count laser frames yet.</Sub>
-            </>
-          ) : (
-            <>
-              <Big mono tone={pdrTone}>{pdr.toFixed(1)}%</Big>
-              <Sub>Frames delivered out of frames sent{picked ? ' during this run.' : ' this session.'}</Sub>
-              {!picked && <div className="mt-3"><Row label="Delivered / sent" value={`${recv.toLocaleString('en-US')} / ${sent.toLocaleString('en-US')}`} /></div>}
-            </>
-          )}
+        <Panel title="Packet delivery ratio" index={3} className="lg:col-span-3" right={<Pill>Not measured</Pill>}>
+          <Big mono>--</Big>
+          <Sub>The firmware does not count laser frames yet.</Sub>
         </Panel>
 
         <Panel title="Total uptime" index={4} className="lg:col-span-3" right={<Pill>{picked ? 'Run' : 'Session'}</Pill>}>
@@ -245,20 +216,15 @@ export default function Logs() {
           </div>
         </Panel>
 
-        {/* Row 2: charts and runs */}
-        <Panel title="Historical charts" index={5} className="lg:col-span-8"
+        {/* Row 2: chart and runs */}
+        <Panel title="RSSI history" index={5} className="lg:col-span-8"
           right={chart.persistence && (
             <Pill tone={chart.persistence === 'supabase' ? 'ok' : 'warn'}>
               {chart.persistence === 'supabase' ? 'Saved to Supabase' : 'Memory only'}
             </Pill>
           )}>
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap gap-2" role="group" aria-label="Metric">
-              {metrics.map((m) => <ChartTab key={m.id} active={metric === m.id} onClick={() => setMetric(m.id)}>{m.label}</ChartTab>)}
-            </div>
-            <div className="flex flex-wrap gap-2" role="group" aria-label="Time range">
-              {RANGES.map((r) => <ChartTab key={r.minutes} active={range === r.minutes} onClick={() => setRange(r.minutes)}>{r.label}</ChartTab>)}
-            </div>
+          <div className="mb-3 flex flex-wrap gap-2" role="group" aria-label="Time range">
+            {RANGES.map((r) => <ChartTab key={r.minutes} active={range === r.minutes} onClick={() => setRange(r.minutes)}>{r.label}</ChartTab>)}
           </div>
 
           {chart.error && rows.length === 0 ? (
@@ -276,39 +242,21 @@ export default function Logs() {
                   <CartesianGrid stroke={GRID} vertical={false} />
                   <XAxis dataKey="ts" type="number" scale="time" domain={['dataMin', 'dataMax']} tickCount={6}
                     tickFormatter={fmtTick} tick={tick} stroke={GRID} />
-                  {metric === 'ber' ? (
-                    <YAxis scale="log" domain={[1e-9, 1]} allowDataOverflow ticks={[1e-9, 1e-7, 1e-5, 1e-3, 1e-1]} width={54}
-                      tickFormatter={(v: number) => v.toExponential(0)} tick={tick} stroke={GRID} />
-                  ) : metric === 'rssi' ? (
-                    <YAxis domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} width={44} tick={tick} stroke={GRID} />
-                  ) : (
-                    <YAxis domain={[0, 'auto']} width={44} tick={tick} stroke={GRID} />
-                  )}
-                  <Tooltip contentStyle={tooltipStyle} labelFormatter={(l) => format(Number(l), 'd MMM HH:mm:ss')}
-                    formatter={(v, name) => {
-                      const n = Number(v)
-                      return [metric === 'ber' ? sci(n) : metric === 'latency' ? `${n.toFixed(0)} ms` : metric === 'snr' ? `${n.toFixed(1)} dB` : n.toFixed(1), String(name)]
-                    }} />
-                  {metric === 'rssi' && <Line dataKey="rssi" name="RSSI" stroke="#3fae63" strokeWidth={2.5} dot={false} isAnimationActive={false} />}
-                  {metric === 'snr' && <Line dataKey="snr" name="SNR" stroke="#d9962b" strokeWidth={2.5} dot={false} isAnimationActive={false} />}
-                  {metric === 'latency' && <Line dataKey="latencyMs" name="Latency" stroke="#2b7a9b" strokeWidth={2.5} dot={false} isAnimationActive={false} />}
-                  {metric === 'ber' && <Line dataKey="berPre" name="Before FEC" stroke="#d4492f" strokeWidth={2} dot={false} isAnimationActive={false} />}
-                  {metric === 'ber' && <Line dataKey="berPost" name="After FEC" stroke="#1d6b3a" strokeWidth={2.5} dot={false} isAnimationActive={false} />}
-                  {metric === 'rssi' && (
-                    <ReferenceLine y={settings.lockAbove} stroke="#1d6b3a" strokeDasharray="6 4" strokeWidth={1.5}
-                      label={{ value: `Lock ${settings.lockAbove}`, position: 'insideTopLeft', fill: '#1d6b3a', fontSize: 12, fontWeight: 600 }} />
-                  )}
-                  {metric === 'rssi' && (
-                    <ReferenceLine y={settings.failBelow} stroke="#9b2c1f" strokeDasharray="6 4" strokeWidth={1.5}
-                      label={{ value: `Failover ${settings.failBelow}`, position: 'insideBottomLeft', fill: '#9b2c1f', fontSize: 12, fontWeight: 600 }} />
-                  )}
+                  <YAxis domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} width={44} tick={tick} stroke={GRID} />
+                  <Tooltip contentStyle={{ borderRadius: 12, border: '1px solid rgba(15,42,26,0.15)', fontSize: 13 }}
+                    labelFormatter={(l) => format(Number(l), 'd MMM HH:mm:ss')}
+                    formatter={(v) => [Number(v).toFixed(1), 'RSSI']} />
+                  <Line dataKey="rssi" name="RSSI" stroke="#3fae63" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+                  <ReferenceLine y={settings.lockAbove} stroke="#1d6b3a" strokeDasharray="6 4" strokeWidth={1.5}
+                    label={{ value: `Lock ${settings.lockAbove}`, position: 'insideTopLeft', fill: '#1d6b3a', fontSize: 12, fontWeight: 600 }} />
+                  <ReferenceLine y={settings.failBelow} stroke="#9b2c1f" strokeDasharray="6 4" strokeWidth={1.5}
+                    label={{ value: `Failover ${settings.failBelow}`, position: 'insideBottomLeft', fill: '#9b2c1f', fontSize: 12, fontWeight: 600 }} />
                 </LineChart>
               </ResponsiveContainer>
               <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-moss-600">
-                <span>{metric === 'ber' ? 'After FEC' : 'Range'}:</span>
-                <span>Lowest <span className="font-mono font-medium text-forest-900">{statFmt(Math.min(...values))}</span></span>
-                <span>Average <span className="font-mono font-medium text-forest-900">{statFmt(mean(values))}</span></span>
-                <span>Highest <span className="font-mono font-medium text-forest-900">{statFmt(Math.max(...values))}</span></span>
+                <span>Lowest <span className="font-mono font-medium text-forest-900">{Math.min(...values).toFixed(1)}</span></span>
+                <span>Average <span className="font-mono font-medium text-forest-900">{mean(values).toFixed(1)}</span></span>
+                <span>Highest <span className="font-mono font-medium text-forest-900">{Math.max(...values).toFixed(1)}</span></span>
                 <span className="ml-auto">{rows.length} points{range >= 60 ? ', averaged' : ''}</span>
               </div>
             </>
@@ -325,7 +273,6 @@ export default function Logs() {
               </div>
               <div className="mt-2">
                 <Row label="Average RSSI" value={activeRun.samples ? activeRun.avgRssi.toFixed(1) : '--'} />
-                <Row label="Delivery" value={`${activeRun.pdr.toFixed(1)}%`} />
                 <Row label="Failovers" value={activeRun.failovers} />
               </div>
               <button onClick={stopRun}
@@ -366,7 +313,7 @@ export default function Logs() {
                       <span className="font-mono text-[12px] text-moss-600">{format(r.startedAt, 'd MMM HH:mm')}</span>
                     </div>
                     <div className="font-mono text-[12px] text-moss-600">
-                      {formatDuration(r.samples)} · RSSI {r.avgRssi.toFixed(0)} · {r.pdr.toFixed(0)}% delivered · {r.failovers} failover{r.failovers === 1 ? '' : 's'}
+                      {formatDuration(r.samples)} · RSSI {r.avgRssi.toFixed(0)} · {r.failovers} failover{r.failovers === 1 ? '' : 's'}
                     </div>
                     {r.notes && <div className="truncate text-[12px] text-moss-600">{r.notes}</div>}
                   </button>
@@ -429,18 +376,6 @@ export default function Logs() {
           {matched.length > MAX_ROWS && <p className="mt-2 text-xs text-moss-600">Showing the newest {MAX_ROWS}. Export to get all {matched.length}.</p>}
         </Panel>
       </div>
-    </div>
-  )
-}
-
-function Header({ children }: { children?: ReactNode }) {
-  return (
-    <div className="rise flex flex-wrap items-end justify-between gap-3" style={idx(0)}>
-      <div>
-        <h1 className="text-3xl font-bold">Logs &amp; Analytics</h1>
-        <p className="mt-1 text-[15px] text-moss-600">Event log, history, test runs and export.</p>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">{children}<SourceTag /></div>
     </div>
   )
 }

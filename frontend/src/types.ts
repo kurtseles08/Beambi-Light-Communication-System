@@ -139,14 +139,10 @@ export type Settings = {
   lockAbove: number // "Locked" at or above this; also the recovery level
   failDelaySec: number
   recoverHoldSec: number
-  maxFrameLoss: number // % frame loss that also triggers failover
   clearRssi: number // calibration: RSSI in clear air
-  ambientWarnLux: number
-  ambientCritLux: number
   lowBatteryPct: number
   critBatteryPct: number
   receiver: Receiver
-  autoScenarios: boolean
 }
 
 // One history point every 5 s
@@ -247,4 +243,5 @@ export type VoiceRecord = {
   samples: number // receiver reports used
   signal: number | null // average receiver signal 0-100
   source: 'speech' | 'typed'
+  autoScenarios: boolean
 }

@@ -8,7 +8,6 @@ import Security from "./pages/Security";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
 import DisasterStatus from "./pages/DisasterStatus";
-import LiveDebug from "./pages/LiveDebug";
 import HardwarePage from "./device/HardwarePage";
 
 export default function App() {
@@ -23,7 +22,6 @@ export default function App() {
         <Route path="security" element={<Security />} />
         <Route path="logs" element={<Logs />} />
         <Route path="settings" element={<Settings />} />
-        <Route path="debug" element={<LiveDebug />} />
         <Route path="hardware" element={<HardwarePage />} />
       </Route>
     </Routes>

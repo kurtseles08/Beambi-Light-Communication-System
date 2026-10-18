@@ -4,51 +4,89 @@ import http from 'http'
 import cors from 'cors'
 import { randomUUID } from 'node:crypto'
 import { Server } from 'socket.io'
-import { createSimulator } from './simulator.js'
 import { createStore } from './store.js'
 import { loadSettings, sanitize, saveSettings } from './settings.js'
-import type {
-  AimCommand, DeviceCommand, DeviceStatus, FilteredEvent, LinkEvent, LoraMessage, MessageRecord,
-  PacketRecord, PongRecord, Reading, Settings, UnitId, UnitTotals,
-} from './types.js'
 import { createHardware, type UnitReport } from './hardware.js'
 import { createSerialBridge, type DeviceBridge } from './serial.js'
-  import { createMockDevice } from './mock.js'
+import type {
+  DeviceCommand, DeviceStatus, FilteredEvent, LinkLog, LinkEvent, LoraMessage, MessageRecord,
+  PacketRecord, PongRecord, Reading, Settings, UnitId, UnitTotals,
+} from './types.js'
 
 const TICK_MS = 1000
 const MAX_READINGS = 120
-const MAX_PACKETS = 200
-const MAX_MESSAGES = 200
 const MAX_LORA_LOG = 100
+const STALE_MS = 5000
 const ORIGINS = process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:5173', 'http://127.0.0.1:5173']
 const COMMAND_TOKEN = process.env.COMMAND_TOKEN || ''
+const DEVICE_KEY = process.env.DEVICE_KEY || ''
+const SHOWN_UNIT: UnitId = process.env.SHOWN_UNIT === 'B' ? 'B' : 'A' // whose full panel /hardware shows
+const MODE_MAP = ['auto', 'fso', 'rf'] as const // firmware mode 0, 1, 2
 
-let settings: Settings = loadSettings()
-const store = await createStore()
-
-const SOURCE: 'simulator' | 'hardware' = process.env.DATA_SOURCE === 'hardware' ? 'hardware' : 'simulator'
-const hw = createHardware(() => settings)
-const MODES = ['auto', 'fso', 'rf'] as const // firmware mode 0, 1, 2
-
-if (SOURCE === 'hardware' && !COMMAND_TOKEN) {
+if (!COMMAND_TOKEN) {
   console.warn('COMMAND_TOKEN is not set: anyone who can reach this server can command the hardware')
 }
 
+let settings: Settings = loadSettings()
+const store = await createStore()
+const hw = createHardware(() => settings)
+
+// ---------------------------------------------------------------- state
+const readings: Reading[] = []
+const loraLog: LoraMessage[] = []
+const pongs: PongRecord[] = []
+let device: DeviceStatus | null = null
+let deviceConnected = false
+const devices: Record<UnitId, DeviceStatus | null> = { A: null, B: null }
+const lastSeen: Record<UnitId, number> = { A: 0, B: 0 }
+const unitsOnline: Record<UnitId, boolean> = { A: false, B: false }
+const wifiQueue: Record<UnitId, DeviceCommand[]> = { A: [], B: [] }
+let lastShownPost = 0
+let bridge: DeviceBridge | null = null
+
+// Voice messages and packet logs are not reported by the firmware yet.
+// They stay empty so the dashboard's init payload keeps its shape.
+const noMessages: MessageRecord[] = []
+const noFiltered: FilteredEvent[] = []
+const noPackets: PacketRecord[] = []
+const emptyTotals = (): UnitTotals => ({ received: 0, accuracySum: 0, stutter: 0, ambient: 0 })
+const totals: Record<UnitId, UnitTotals> = { A: emptyTotals(), B: emptyTotals() }
+
+// ---------------------------------------------------------------- server
 const app = express()
 app.use(cors({ origin: ORIGINS }))
 app.use(express.json())
 
-// Optional HTTP ingest for Wi-Fi units. Disabled unless DEVICE_KEY is set, so it is never open by accident.
+const server = http.createServer(app)
+const io = new Server(server, { cors: { origin: ORIGINS } })
+
+function emitEvent(severity: LinkEvent['severity'], type: string, message: string) {
+  const e: LinkEvent = { id: randomUUID(), ts: Date.now(), severity, type, message }
+  store.addEvent(e)
+  io.emit('event', e)
+}
+
+function setDeviceConnected(c: boolean) {
+  if (c === deviceConnected) return
+  deviceConnected = c
+  if (!c) device = null
+  io.emit('device:connection', c)
+  emitEvent(c ? 'Info' : 'Critical', 'device', c ? 'Device connected' : 'Device disconnected')
+}
+
+// ---------------------------------------------------------------- HTTP routes
+app.get('/health', (_req, res) => res.json({ status: 'ok', source: 'hardware', deviceConnected, time: new Date().toISOString() }))
+app.get('/api/latest', (_req, res) => res.json(readings.at(-1) ?? null))
+app.get('/api/device', (_req, res) => res.json(device))
+app.get('/api/history', (req, res) => {
+  const minutes = Math.min(1440, Math.max(1, Number(req.query.minutes) || 60))
+  res.json({ samples: store.history(minutes), persistence: store.persistence })
+})
+
+// Optional HTTP ingest of a simple per-unit report. Disabled unless DEVICE_KEY is set.
 app.post('/api/telemetry', (req, res) => {
-  const key = process.env.DEVICE_KEY
-  if (!key) {
-    res.status(403).json({ error: 'telemetry endpoint disabled (set DEVICE_KEY to enable)' })
-    return
-  }
-  if (req.get('x-api-key') !== key) {
-    res.status(401).json({ error: 'bad key' })
-    return
-  }
+  if (!DEVICE_KEY) { res.status(403).json({ error: 'disabled (set DEVICE_KEY)' }); return }
+  if (req.get('x-api-key') !== DEVICE_KEY) { res.status(401).json({ error: 'bad key' }); return }
   const b = req.body as Partial<UnitReport> | undefined
   if (!b || (b.unit !== 'A' && b.unit !== 'B') || typeof b.rssi !== 'number' || !Number.isFinite(b.rssi)) {
     res.status(400).json({ error: 'need unit (A or B) and a numeric rssi' })
@@ -58,47 +96,27 @@ app.post('/api/telemetry', (req, res) => {
   res.json({ ok: true })
 })
 
-const readings: Reading[] = []
-const packets: PacketRecord[] = []
-const messages: MessageRecord[] = []
-const filtered: FilteredEvent[] = []
-const loraLog: LoraMessage[] = []
-const pongs: PongRecord[] = []
-const fresh = (): UnitTotals => ({ received: 0, accuracySum: 0, stutter: 0, ambient: 0 })
-const totals: Record<UnitId, UnitTotals> = { A: fresh(), B: fresh() }
-let scenario = 'clear'
-let device: DeviceStatus | null = null
-let deviceConnected = false
-
-const devices: Record<UnitId, DeviceStatus | null> = { A: null, B: null } // latest full status of each unit
-const lastSeen: Record<UnitId, number> = { A: 0, B: 0 }
-const unitsOnline: Record<UnitId, boolean> = { A: false, B: false }
-
-
-app.get('/health', (_req, res) => res.json({ status: 'ok', source: SOURCE, deviceConnected, time: new Date().toISOString() }))
-app.get('/api/latest', (_req, res) => res.json(readings.at(-1) ?? null))
-app.get('/api/device', (_req, res) => res.json(device))
-app.get('/api/history', (req, res) => {
-  const minutes = Math.min(1440, Math.max(1, Number(req.query.minutes) || 60))
-  res.json({ samples: store.history(minutes), persistence: store.persistence })
+// One endpoint for everything a Wi-Fi unit says: status, hello, cal, lora_msg, pong.
+// The reply carries any dashboard commands waiting for that unit.
+app.post('/api/device', (req, res) => {
+  if (!DEVICE_KEY) { res.status(403).json({ error: 'disabled (set DEVICE_KEY)' }); return }
+  if (req.get('x-api-key') !== DEVICE_KEY) { res.status(401).json({ error: 'bad key' }); return }
+  const b = req.body as Record<string, unknown> | undefined
+  if (!b || typeof b.t !== 'string') { res.status(400).json({ error: 'need t' }); return }
+  const unit: UnitId | null = b.unit === 'A' || b.unit === 'B' ? b.unit : null
+  if (b.t === 'status' && !unit) { res.status(400).json({ error: 'need unit A or B' }); return }
+  onDeviceLine(b, true)
+  if (unit === SHOWN_UNIT) {
+    lastShownPost = Date.now()
+    setDeviceConnected(true)
+  }
+  res.json({ ok: true, cmds: unit ? wifiQueue[unit].splice(0) : [] })
 })
 
-const server = http.createServer(app)
-const io = new Server(server, { cors: { origin: ORIGINS } })
-const sim = createSimulator(() => settings)
-
-function emitEvent(severity: LinkEvent['severity'], type: string, message: string) {
-  const e: LinkEvent = { id: randomUUID(), ts: Date.now(), severity, type, message }
-  store.addEvent(e)
-  io.emit('event', e)
-}
-
-// ---------------------------------------------------------------- hardware (USB serial)
-let bridge: DeviceBridge | null = null
-
+// ---------------------------------------------------------------- device messages (USB or Wi-Fi)
 function onDeviceLine(o: Record<string, unknown>, wifi = false) {
   switch (o.t) {
-         case 'status': {
+    case 'status': {
       const s = o as unknown as DeviceStatus
       if (typeof s.env !== 'number' || (s.unit !== 'A' && s.unit !== 'B')) return
       devices[s.unit] = { ...s, ts: Date.now() }
@@ -110,7 +128,6 @@ function onDeviceLine(o: Record<string, unknown>, wifi = false) {
         io.emit('device', device)
       }
 
-      const MODE_MAP = ['auto', 'fso', 'rf'] as const
       const peerHeard = s.lora.ok === 1 && s.lora.peer !== '-' && s.lora.ageS >= 0 && s.lora.ageS <= 10
       const haveBat = typeof s.batPct === 'number' && s.batPct >= 0 && typeof s.batV === 'number' && s.batV > 0
       hw.ingest({
@@ -127,9 +144,7 @@ function onDeviceLine(o: Record<string, unknown>, wifi = false) {
       })
       break
     }
-    case 'event':
-      break // path/failover events are raised by hardware.ts, so they are not duplicated here
-    // Failover and mode events come from hardware.ts, so the 'path' line is not turned into an event here
+    // Path, failover and mode events are raised by hardware.ts, so 'event' lines are ignored here.
     case 'cal':
       emitEvent('Info', 'calibration', `Link threshold set to ${Number(o.thr).toFixed(3)} (noise mean ${Number(o.mean).toFixed(3)})`)
       break
@@ -159,32 +174,25 @@ function onDeviceLine(o: Record<string, unknown>, wifi = false) {
   }
 }
 
-   if (SOURCE === 'hardware') {
-     const onConnection = (c: boolean) => {
-       if (c === deviceConnected) return
-       deviceConnected = c
-       if (!c) device = null
-       io.emit('device:connection', c)
-       emitEvent(c ? 'Info' : 'Critical', 'device', c ? 'Device connected' : 'Device disconnected')
-     }
-     if (process.env.MOCK_DEVICE === 'true') {
-       bridge = createMockDevice({ onLine: onDeviceLine, onConnection })
-     } else {
-       const path = process.env.SERIAL_PATH
-       if (!path) {
-         console.error('DATA_SOURCE=hardware but SERIAL_PATH is not set (example: COM5 or /dev/ttyUSB0)')
-       } else {
-         bridge = createSerialBridge({
-           path, baudRate: Number(process.env.SERIAL_BAUD) || 115200, onLine: onDeviceLine, onConnection,
-         })
-       }
-     }
-   }
+// ---------------------------------------------------------------- USB serial (optional)
+// With SERIAL_PATH set, one board is read over USB. Without it, units report over Wi-Fi.
+const serialPath = process.env.SERIAL_PATH
+if (serialPath) {
+  bridge = createSerialBridge({
+    path: serialPath,
+    baudRate: Number(process.env.SERIAL_BAUD) || 115200,
+    onLine: (o) => onDeviceLine(o),
+    onConnection: setDeviceConnected,
+  })
+} else if (!DEVICE_KEY) {
+  console.warn('Neither SERIAL_PATH nor DEVICE_KEY is set: no hardware can connect')
+}
 
 // ---------------------------------------------------------------- command validation
 const SET_RANGES: Record<string, [number, number]> = {
   txSrc: [0, 4], rxSink: [0, 2], vol: [0.05, 1], rxGain: [1, 60], micGain: [0.5, 30], duck: [0, 1], gate: [0, 1],
 }
+
 function validateCommand(c: unknown): DeviceCommand | null {
   if (typeof c !== 'object' || c === null) return null
   const o = c as Record<string, unknown>
@@ -209,59 +217,19 @@ function validateCommand(c: unknown): DeviceCommand | null {
   }
 }
 
-
-
-
-// ---------------------------------------------------------------- Wi-Fi units (HTTP reports)
-const SHOWN_UNIT: UnitId = process.env.SHOWN_UNIT === 'B' ? 'B' : 'A' // whose full panel /hardware shows
-const wifiQueue: Record<UnitId, DeviceCommand[]> = { A: [], B: [] }
-let lastShownPost = 0
-
-function setDeviceConnected(c: boolean) {
-  if (c === deviceConnected) return
-  deviceConnected = c
-  if (!c) device = null
-  io.emit('device:connection', c)
-  emitEvent(c ? 'Info' : 'Critical', 'device', c ? 'Device connected' : 'Device disconnected')
-}
-
-// One endpoint for everything a unit says: status, hello, cal, lora_msg, pong.
-// The reply carries any dashboard commands waiting for that unit.
-app.post('/api/device', (req, res) => {
-  if (SOURCE !== 'hardware') { res.status(409).json({ error: 'backend is not in hardware mode' }); return }
-  const key = process.env.DEVICE_KEY
-  if (!key) { res.status(403).json({ error: 'disabled (set DEVICE_KEY)' }); return }
-  if (req.get('x-api-key') !== key) { res.status(401).json({ error: 'bad key' }); return }
-  const b = req.body as Record<string, unknown> | undefined
-  if (!b || typeof b.t !== 'string') { res.status(400).json({ error: 'need t' }); return }
-  const unit: UnitId | null = b.unit === 'A' || b.unit === 'B' ? b.unit : null
-  if (b.t === 'status' && !unit) { res.status(400).json({ error: 'need unit A or B' }); return }
-  onDeviceLine(b, true)
-  if (unit === SHOWN_UNIT) {
-    lastShownPost = Date.now()
-    setDeviceConnected(true)
-  }
-  res.json({ ok: true, cmds: unit ? wifiQueue[unit].splice(0) : [] })
-})
-
-// No report from the shown unit for 5 s means it is offline
+// ---------------------------------------------------------------- offline detection
 setInterval(() => {
-  if (SOURCE !== 'hardware' || bridge) return
-  if (deviceConnected && Date.now() - lastShownPost > 5000) {
+  // Wi-Fi: no report from the shown unit for 5 s means it is offline
+  if (!bridge && deviceConnected && Date.now() - lastShownPost > STALE_MS) {
     wifiQueue.A.length = 0
     wifiQueue.B.length = 0
     setDeviceConnected(false)
   }
-}, 1000)
 
-
-
-// Per-unit online state: no status for 5 s means that unit is offline
-setInterval(() => {
-  if (SOURCE !== 'hardware') return
+  // Per unit: no status for 5 s means that unit is offline
   let changed = false
   for (const u of ['A', 'B'] as const) {
-    const on = Date.now() - lastSeen[u] < 5000
+    const on = Date.now() - lastSeen[u] < STALE_MS
     if (on === unitsOnline[u]) continue
     unitsOnline[u] = on
     changed = true
@@ -277,45 +245,36 @@ setInterval(() => {
   }
 }, 1000)
 
-
-
 // ---------------------------------------------------------------- sockets
 io.on('connection', (socket) => {
   console.log('Dashboard connected:', socket.id)
   const canCommand = !COMMAND_TOKEN || socket.handshake.auth?.token === COMMAND_TOKEN
 
   socket.emit('init', {
-    readings, events: store.events, packets, messages, filtered, totals, runs: store.runs, activeRun: store.activeRun(),
-    settings, scenario, source: SOURCE, persistence: store.persistence,
-    device, deviceConnected, loraLog, pongs, canCommand, devices, unitsOnline,
+    readings, events: store.events, packets: noPackets, messages: noMessages, filtered: noFiltered, totals,
+    runs: store.runs, activeRun: store.activeRun(), settings, scenario: 'clear', source: 'hardware',
+    persistence: store.persistence, device, deviceConnected, loraLog, pongs, canCommand, devices, unitsOnline,
   })
 
-  socket.on('sim:inject', (kind) => { if (SOURCE === 'simulator') sim.inject(kind) })
-  socket.on('sim:aim', (cmd) => {
-    if (SOURCE === 'simulator' && typeof cmd === 'object' && cmd !== null) sim.aim(cmd as AimCommand)
-  })
-
-    socket.on('device:command', (raw, target?: unknown) => {
-    if (SOURCE !== 'hardware') return
+  socket.on('device:command', (raw, target?: unknown) => {
     if (!canCommand) { socket.emit('device:ack', { ok: false, error: 'not authorised' }); return }
     const cmd = validateCommand(raw)
     if (!cmd) { socket.emit('device:ack', { ok: false, error: 'invalid command' }); return }
-    // The page can name the target: 'A', 'B' or 'both'. Without it the shown unit is used.
-    const t = target
-    const targets: UnitId[] = t === 'both' ? ['A', 'B'] : t === 'B' ? ['B'] : t === 'A' ? ['A'] : [SHOWN_UNIT]
+
     if (bridge) {
       const sent = bridge.send(cmd) // one USB board
       socket.emit('device:ack', { ok: sent, error: sent ? undefined : 'device not connected' })
-    } else {
-      // Wi-Fi: each unit picks its commands up with its next report
-      for (const u of targets) {
-        const q = wifiQueue[u]
-        if (q.length >= 20) q.shift()
-        q.push(cmd)
-      }
-      const ok = targets.some((u) => unitsOnline[u])
-      socket.emit('device:ack', { ok, error: ok ? undefined : 'unit not connected' })
+      return
     }
+    // Wi-Fi: the page can name the target ('A', 'B' or 'both'). Each unit picks commands up with its next report.
+    const targets: UnitId[] = target === 'both' ? ['A', 'B'] : target === 'B' ? ['B'] : target === 'A' ? ['A'] : [SHOWN_UNIT]
+    for (const u of targets) {
+      const q = wifiQueue[u]
+      if (q.length >= 20) q.shift()
+      q.push(cmd)
+    }
+    const ok = targets.some((u) => unitsOnline[u])
+    socket.emit('device:ack', { ok, error: ok ? undefined : 'unit not connected' })
   })
 
   socket.on('settings:update', (patch) => {
@@ -345,8 +304,9 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => console.log('Dashboard disconnected:', socket.id))
 })
 
+// ---------------------------------------------------------------- main loop
 setInterval(() => {
-  const step = SOURCE === 'hardware' ? hw.step() : sim.step()
+  const step = hw.step() // null when no unit has reported recently, so the dashboard shows Offline
   if (!step) return
   const { reading } = step
   readings.push(reading)
@@ -359,30 +319,8 @@ setInterval(() => {
     store.addEvent(e)
     io.emit('event', e)
   }
-  for (const m of step.messages) {
-    messages.push(m)
-    if (messages.length > MAX_MESSAGES) messages.shift()
-    totals[m.to].received++
-    totals[m.to].accuracySum += m.accuracy
-    io.emit('message', m)
-  }
-  for (const f of step.filtered) {
-    filtered.push(f)
-    if (filtered.length > MAX_MESSAGES) filtered.shift()
-    totals[f.to][f.kind]++
-    io.emit('filtered', f)
-  }
-  if (step.messages.length || step.filtered.length) io.emit('totals', totals)
-  packets.push(...step.packets)
-  if (packets.length > MAX_PACKETS) packets.splice(0, packets.length - MAX_PACKETS)
-  io.emit('packets', step.packets)
-
-  if (step.scenario !== scenario) {
-    scenario = step.scenario
-    io.emit('scenario', scenario)
-  }
   if (live) io.emit('run:active', live)
 }, TICK_MS)
 
 const PORT = process.env.PORT || 4000
-server.listen(PORT, () => console.log(`Backend running on port ${PORT} (source: ${SOURCE})`))
+server.listen(PORT, () => console.log(`Backend running on port ${PORT}`))

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { LinkEvent, Reading, Run, Sample, Severity } from './types.js'
 
-const SOURCE = process.env.DATA_SOURCE === 'hardware' ? 'hardware' : 'simulator'
+const SOURCE = 'hardware'
 const SAMPLE_MS = 5000
 const MAX_AGE_MS = 24 * 3600 * 1000
 const MAX_EVENTS = 500
