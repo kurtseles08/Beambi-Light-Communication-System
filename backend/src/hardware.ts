@@ -51,6 +51,7 @@ export function createHardware(getSettings: () => Settings) {
   let wasChannel: Channel | null = null
   let wasMode: Mode | null = null
   const wasTamper: Record<UnitId, boolean> = { A: false, B: false }
+  const batFlag: Record<UnitId, number> = { A: 0, B: 0 } // 0 ok, 1 low, 2 critical
   let failovers = 0
   let lastFailoverTs: number | null = null
   let lastFailoverReason: string | null = null
@@ -107,11 +108,20 @@ export function createHardware(getSettings: () => Settings) {
     wasMode = devMode
 
     for (const x of live) {
-      const t = x.r.tamper === true
-      if (t && !wasTamper[x.r.unit]) {
-        addEvent('Critical', 'tamper', `Tamper detected on Unit ${x.r.unit}: enclosure opened`, { unit: x.r.unit })
-      }
-      wasTamper[x.r.unit] = t
+      const pct = num(x.r.battery)
+      if (pct === undefined) continue
+      const u = x.r.unit
+      if (pct <= s.critBatteryPct) {
+        if (batFlag[u] < 2) {
+          batFlag[u] = 2
+          addEvent('Critical', 'battery', `Unit ${u} battery critical (${pct.toFixed(0)}%)`, { unit: u })
+        }
+      } else if (pct <= s.lowBatteryPct) {
+        if (batFlag[u] < 1) {
+          batFlag[u] = 1
+          addEvent('Warning', 'battery', `Unit ${u} battery low (${pct.toFixed(0)}%)`, { unit: u })
+        }
+      } else if (pct > s.lowBatteryPct + 5) batFlag[u] = 0
     }
 
     // A -> B is what B received of what A sent

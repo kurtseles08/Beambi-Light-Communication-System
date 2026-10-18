@@ -70,6 +70,11 @@ let scenario = 'clear'
 let device: DeviceStatus | null = null
 let deviceConnected = false
 
+const devices: Record<UnitId, DeviceStatus | null> = { A: null, B: null } // latest full status of each unit
+const lastSeen: Record<UnitId, number> = { A: 0, B: 0 }
+const unitsOnline: Record<UnitId, boolean> = { A: false, B: false }
+
+
 app.get('/health', (_req, res) => res.json({ status: 'ok', source: SOURCE, deviceConnected, time: new Date().toISOString() }))
 app.get('/api/latest', (_req, res) => res.json(readings.at(-1) ?? null))
 app.get('/api/device', (_req, res) => res.json(device))
@@ -91,25 +96,34 @@ function emitEvent(severity: LinkEvent['severity'], type: string, message: strin
 // ---------------------------------------------------------------- hardware (USB serial)
 let bridge: DeviceBridge | null = null
 
-function onDeviceLine(o: Record<string, unknown>) {
+function onDeviceLine(o: Record<string, unknown>, wifi = false) {
   switch (o.t) {
-        case 'status': {
+         case 'status': {
       const s = o as unknown as DeviceStatus
       if (typeof s.env !== 'number' || (s.unit !== 'A' && s.unit !== 'B')) return
-      device = { ...s, ts: Date.now() }
-      io.emit('device', device)
+      devices[s.unit] = { ...s, ts: Date.now() }
+      lastSeen[s.unit] = Date.now()
+      io.emit('devices', devices)
+      // Over USB there is one board, so show it. Over Wi-Fi both report and /hardware shows SHOWN_UNIT.
+      if (!wifi || s.unit === SHOWN_UNIT) {
+        device = { ...s, ts: Date.now() }
+        io.emit('device', device)
+      }
 
       const MODE_MAP = ['auto', 'fso', 'rf'] as const
       const peerHeard = s.lora.ok === 1 && s.lora.peer !== '-' && s.lora.ageS >= 0 && s.lora.ageS <= 10
+      const haveBat = typeof s.batPct === 'number' && s.batPct >= 0 && typeof s.batV === 'number' && s.batV > 0
       hw.ingest({
         unit: s.unit,
-        // threshold maps to 50 (placeholder, tune with real env/thr values)
-        rssi: Math.min(100, Math.max(0, (s.env / Math.max(s.thr, 0.001)) * 50)),
+        // log scale: env = thr gives 50, 10x thr gives 100, 0.1x thr gives 0
+        rssi: Math.min(100, Math.max(0, 50 + 50 * Math.log10(Math.max(s.env, 1e-4) / Math.max(s.thr, 1e-3)))),
         mode: MODE_MAP[s.mode] ?? 'auto',
         laserOk: s.laser === 1,
         channel: s.failover ? 'RF' : 'FSO',
         rfRssi: peerHeard ? s.lora.rssi : undefined,
         rfSnr: peerHeard ? s.lora.snr : undefined,
+        battery: haveBat ? s.batPct : undefined,
+        voltage: haveBat ? s.batV : undefined,
       })
       break
     }
@@ -195,6 +209,76 @@ function validateCommand(c: unknown): DeviceCommand | null {
   }
 }
 
+
+
+
+// ---------------------------------------------------------------- Wi-Fi units (HTTP reports)
+const SHOWN_UNIT: UnitId = process.env.SHOWN_UNIT === 'B' ? 'B' : 'A' // whose full panel /hardware shows
+const wifiQueue: Record<UnitId, DeviceCommand[]> = { A: [], B: [] }
+let lastShownPost = 0
+
+function setDeviceConnected(c: boolean) {
+  if (c === deviceConnected) return
+  deviceConnected = c
+  if (!c) device = null
+  io.emit('device:connection', c)
+  emitEvent(c ? 'Info' : 'Critical', 'device', c ? 'Device connected' : 'Device disconnected')
+}
+
+// One endpoint for everything a unit says: status, hello, cal, lora_msg, pong.
+// The reply carries any dashboard commands waiting for that unit.
+app.post('/api/device', (req, res) => {
+  if (SOURCE !== 'hardware') { res.status(409).json({ error: 'backend is not in hardware mode' }); return }
+  const key = process.env.DEVICE_KEY
+  if (!key) { res.status(403).json({ error: 'disabled (set DEVICE_KEY)' }); return }
+  if (req.get('x-api-key') !== key) { res.status(401).json({ error: 'bad key' }); return }
+  const b = req.body as Record<string, unknown> | undefined
+  if (!b || typeof b.t !== 'string') { res.status(400).json({ error: 'need t' }); return }
+  const unit: UnitId | null = b.unit === 'A' || b.unit === 'B' ? b.unit : null
+  if (b.t === 'status' && !unit) { res.status(400).json({ error: 'need unit A or B' }); return }
+  onDeviceLine(b, true)
+  if (unit === SHOWN_UNIT) {
+    lastShownPost = Date.now()
+    setDeviceConnected(true)
+  }
+  res.json({ ok: true, cmds: unit ? wifiQueue[unit].splice(0) : [] })
+})
+
+// No report from the shown unit for 5 s means it is offline
+setInterval(() => {
+  if (SOURCE !== 'hardware' || bridge) return
+  if (deviceConnected && Date.now() - lastShownPost > 5000) {
+    wifiQueue.A.length = 0
+    wifiQueue.B.length = 0
+    setDeviceConnected(false)
+  }
+}, 1000)
+
+
+
+// Per-unit online state: no status for 5 s means that unit is offline
+setInterval(() => {
+  if (SOURCE !== 'hardware') return
+  let changed = false
+  for (const u of ['A', 'B'] as const) {
+    const on = Date.now() - lastSeen[u] < 5000
+    if (on === unitsOnline[u]) continue
+    unitsOnline[u] = on
+    changed = true
+    if (!on) {
+      devices[u] = null
+      wifiQueue[u].length = 0
+    }
+    if (u !== SHOWN_UNIT) emitEvent(on ? 'Info' : 'Critical', 'device', `Unit ${u} ${on ? 'online' : 'offline'}`)
+  }
+  if (changed) {
+    io.emit('devices:online', unitsOnline)
+    io.emit('devices', devices)
+  }
+}, 1000)
+
+
+
 // ---------------------------------------------------------------- sockets
 io.on('connection', (socket) => {
   console.log('Dashboard connected:', socket.id)
@@ -203,7 +287,7 @@ io.on('connection', (socket) => {
   socket.emit('init', {
     readings, events: store.events, packets, messages, filtered, totals, runs: store.runs, activeRun: store.activeRun(),
     settings, scenario, source: SOURCE, persistence: store.persistence,
-    device, deviceConnected, loraLog, pongs, canCommand,
+    device, deviceConnected, loraLog, pongs, canCommand, devices, unitsOnline,
   })
 
   socket.on('sim:inject', (kind) => { if (SOURCE === 'simulator') sim.inject(kind) })
@@ -211,13 +295,27 @@ io.on('connection', (socket) => {
     if (SOURCE === 'simulator' && typeof cmd === 'object' && cmd !== null) sim.aim(cmd as AimCommand)
   })
 
-  socket.on('device:command', (raw) => {
-    if (SOURCE !== 'hardware' || !bridge) return
+    socket.on('device:command', (raw, target?: unknown) => {
+    if (SOURCE !== 'hardware') return
     if (!canCommand) { socket.emit('device:ack', { ok: false, error: 'not authorised' }); return }
     const cmd = validateCommand(raw)
     if (!cmd) { socket.emit('device:ack', { ok: false, error: 'invalid command' }); return }
-    const sent = bridge.send(cmd)
-    socket.emit('device:ack', { ok: sent, error: sent ? undefined : 'device not connected' })
+    // The page can name the target: 'A', 'B' or 'both'. Without it the shown unit is used.
+    const t = target
+    const targets: UnitId[] = t === 'both' ? ['A', 'B'] : t === 'B' ? ['B'] : t === 'A' ? ['A'] : [SHOWN_UNIT]
+    if (bridge) {
+      const sent = bridge.send(cmd) // one USB board
+      socket.emit('device:ack', { ok: sent, error: sent ? undefined : 'device not connected' })
+    } else {
+      // Wi-Fi: each unit picks its commands up with its next report
+      for (const u of targets) {
+        const q = wifiQueue[u]
+        if (q.length >= 20) q.shift()
+        q.push(cmd)
+      }
+      const ok = targets.some((u) => unitsOnline[u])
+      socket.emit('device:ack', { ok, error: ok ? undefined : 'unit not connected' })
+    }
   })
 
   socket.on('settings:update', (patch) => {

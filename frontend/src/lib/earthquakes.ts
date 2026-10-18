@@ -7,6 +7,13 @@ export type Quake = {
   url: string
 }
 
+
+
+type UsgsFeature = {
+  id: string
+  properties: { mag: number | null; place: string | null; time: number; url: string }
+  geometry: { coordinates: number[] }
+}
 export async function fetchQuakes(): Promise<Quake[]> {
   const params = new URLSearchParams({
     format: 'geojson',
@@ -23,7 +30,7 @@ export async function fetchQuakes(): Promise<Quake[]> {
   const res = await fetch(`https://earthquake.usgs.gov/fdsnws/event/1/query?${params}`)
   if (!res.ok) throw new Error(`Earthquake request failed (${res.status})`)
   const data = await res.json()
-  return data.features.map((f: any) => ({
+    return (data.features as UsgsFeature[]).map((f) => ({
     id: f.id,
     magnitude: f.properties.mag ?? 0,
     place: f.properties.place ?? 'Unknown location',

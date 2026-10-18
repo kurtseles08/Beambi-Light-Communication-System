@@ -8,6 +8,9 @@ import Panel from '../components/Panel'
 import Gauge from '../components/Gauge'
 import { Bar, Big, Pill, Row, SourceTag, Sub, toneChip, toneText, type Tone } from '../components/ui'
 import type { Direction, PacketRecord } from '../types'
+import { useDevice } from '../device/deviceStore'
+
+
 
 const idx = (i: number) => ({ '--i': i }) as CSSProperties
 
@@ -62,10 +65,10 @@ function Header({ children }: { children?: ReactNode }) {
   )
 }
 
-function Tabs({ tab, onChange }: { tab: TabId; onChange: (t: TabId) => void }) {
+function Tabs({ tab, tabs, onChange }: { tab: TabId; tabs: readonly { id: TabId; label: string }[]; onChange: (t: TabId) => void }) {
   return (
     <div role="tablist" aria-label="Link detail sections" className="flex flex-wrap gap-2">
-      {TABS.map((t) => (
+      {tabs.map((t) => (
         <button
           key={t.id}
           role="tab"
@@ -88,7 +91,7 @@ function Tabs({ tab, onChange }: { tab: TabId; onChange: (t: TabId) => void }) {
 
 // ---------- FSO tab ----------
 
-function SignalTrend({ data }: { data: { t: number; rssi: number; snr: number }[] }) {
+function SignalTrend({ data, hw }: { data: { t: number; rssi: number; snr: number }[]; hw: boolean }) {
   const tick = { fill: TEXT, fontSize: 12 }
   return (
     <ResponsiveContainer width="100%" height={260}>
@@ -97,20 +100,20 @@ function SignalTrend({ data }: { data: { t: number; rssi: number; snr: number }[
         <XAxis dataKey="t" type="number" domain={['dataMin', 0]} ticks={[-60, -45, -30, -15, 0]}
           tickFormatter={(v: number) => (v === 0 ? 'now' : `${v}s`)} tick={tick} stroke={GRID} />
         <YAxis yAxisId="rssi" domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} width={38} tick={tick} stroke={GRID} />
-        <YAxis yAxisId="snr" orientation="right" domain={[-5, 30]} width={38} tick={tick} stroke={GRID} />
+        {!hw && <YAxis yAxisId="snr" orientation="right" domain={[-5, 30]} width={38} tick={tick} stroke={GRID} />}
         <Tooltip
           contentStyle={{ borderRadius: 12, border: '1px solid rgba(15,42,26,0.15)', fontSize: 13 }}
           labelFormatter={(l) => (Number(l) === 0 ? 'Now' : `${Math.abs(Number(l))} s ago`)}
           formatter={(value, name) => [Number(value).toFixed(1), name === 'rssi' ? 'RSSI' : 'SNR (dB)']}
         />
         <Line yAxisId="rssi" dataKey="rssi" name="rssi" stroke="#3fae63" strokeWidth={2.5} dot={false} isAnimationActive={false} />
-        <Line yAxisId="snr" dataKey="snr" name="snr" stroke="#d9962b" strokeWidth={2} dot={false} isAnimationActive={false} />
+        {!hw && <Line yAxisId="snr" dataKey="snr" name="snr" stroke="#d9962b" strokeWidth={2} dot={false} isAnimationActive={false} />}
       </LineChart>
     </ResponsiveContainer>
   )
 }
 
-function FsoTab() {
+function FsoTab({ hw }: { hw: boolean }) {
   const readings = useLink((s) => s.readings)
   const settings = useLink((s) => s.settings)
   const latest = readings[readings.length - 1]
@@ -121,50 +124,66 @@ function FsoTab() {
   const gain = f.berPost > 0 ? Math.log10(f.berPre / f.berPost) : 0
   const lossTone: Tone = f.frameLoss > settings.maxFrameLoss ? 'crit' : f.frameLoss > 5 ? 'warn' : 'default'
   const luxTone: Tone = f.ambientLux >= settings.ambientCritLux ? 'crit' : f.ambientLux >= settings.ambientWarnLux ? 'warn' : 'default'
+  const half = hw ? 'lg:col-span-6' : 'lg:col-span-4'
 
   const recent = readings.slice(-60)
   const data = recent.map((r, i) => ({ t: i - (recent.length - 1), rssi: r.fso.rssi, snr: r.fso.snr }))
 
   return (
     <div className="grid gap-5 lg:grid-cols-12">
-      <Panel title="Optical signal" tone={zoneTone} index={1} className="lg:col-span-4"
+      <Panel title="Optical signal" tone={zoneTone} index={1} className={half}
         right={<Pill tone={zoneTone}>{zone === 'locked' ? 'Above lock' : zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
         <Gauge value={f.rssi} fail={settings.failBelow} lock={settings.lockAbove} />
         <div className="mt-3">
           <Row label="RSSI" value={f.rssi.toFixed(1)} tone={zoneTone} />
-          <Row label="SNR" value={`${f.snr.toFixed(1)} dB`} tone={snrTone(f.snr)} />
-          <Row label="Frame loss" value={`${f.frameLoss.toFixed(1)}%`} tone={lossTone} />
+          {!hw && <Row label="SNR" value={`${f.snr.toFixed(1)} dB`} tone={snrTone(f.snr)} />}
+          {!hw && <Row label="Frame loss" value={`${f.frameLoss.toFixed(1)}%`} tone={lossTone} />}
         </div>
       </Panel>
 
-      <Panel title="Error correction (FEC)" tone={berTone(f.berPost)} index={2} className="lg:col-span-4">
-        <Big mono size="md" tone={berTone(f.berPost)}>{formatBer(f.berPost)}</Big>
-        <Sub>Bit error rate after error correction. Lower is better.</Sub>
-        <div className="mt-4">
-          <Row label="BER before FEC" value={formatBer(f.berPre)} tone={berTone(f.berPre)} />
-          <Row label="BER after FEC" value={formatBer(f.berPost)} tone={berTone(f.berPost)} />
-          <Row label="FEC improvement" value={gain >= 0.05 ? `${gain.toFixed(1)} orders of magnitude` : 'Little effect'} />
-        </div>
+      {!hw && (
+        <Panel title="Error correction (FEC)" tone={berTone(f.berPost)} index={2} className="lg:col-span-4">
+          <Big mono size="md" tone={berTone(f.berPost)}>{formatBer(f.berPost)}</Big>
+          <Sub>Bit error rate after error correction. Lower is better.</Sub>
+          <div className="mt-4">
+            <Row label="BER before FEC" value={formatBer(f.berPre)} tone={berTone(f.berPre)} />
+            <Row label="BER after FEC" value={formatBer(f.berPost)} tone={berTone(f.berPost)} />
+            <Row label="FEC improvement" value={gain >= 0.05 ? `${gain.toFixed(1)} orders of magnitude` : 'Little effect'} />
+          </div>
+        </Panel>
+      )}
+
+      <Panel title="Hardware status" index={3} className={half}
+        right={hw
+          ? <Pill tone={f.laserOk ? 'ok' : 'warn'}>{f.laserOk ? 'Link up' : 'Link down'}</Pill>
+          : <Pill tone={f.laserOk && f.rxPresent ? 'ok' : 'crit'}>{f.laserOk && f.rxPresent ? 'All good' : 'Check'}</Pill>}>
+        {hw ? (
+          <>
+            <Row label="Laser link" value={f.laserOk ? 'Up' : 'Down'} tone={f.laserOk ? 'ok' : 'warn'} />
+            <Row label="Receiver type" value={settings.receiver === 'solar-panel' ? 'Solar panel' : 'Photodiode'} />
+            <Row label="Carrying traffic" value={latest.activeChannel === 'FSO' ? 'Yes' : 'No, on RF fallback'}
+              tone={latest.activeChannel === 'FSO' ? 'ok' : 'warn'} />
+          </>
+        ) : (
+          <>
+            <Row label="Laser transmitter" value={f.laserOk ? 'OK' : 'Fault'} tone={f.laserOk ? 'ok' : 'crit'} />
+            <Row label="Optical receiver" value={f.rxPresent ? 'Light detected' : 'No light'} tone={f.rxPresent ? 'ok' : 'crit'} />
+            <Row label="Receiver type" value={settings.receiver === 'solar-panel' ? 'Solar panel' : 'Photodiode'} />
+            <Row label="Ambient light" value={`${f.ambientLux.toLocaleString('en-US')} lx`} tone={luxTone} />
+            <Row label="Carrying traffic" value={latest.activeChannel === 'FSO' ? 'Yes' : 'No, on RF fallback'}
+              tone={latest.activeChannel === 'FSO' ? 'ok' : 'warn'} />
+          </>
+        )}
       </Panel>
 
-      <Panel title="Hardware status" index={3} className="lg:col-span-4"
-        right={<Pill tone={f.laserOk && f.rxPresent ? 'ok' : 'crit'}>{f.laserOk && f.rxPresent ? 'All good' : 'Check'}</Pill>}>
-        <Row label="Laser transmitter" value={f.laserOk ? 'OK' : 'Fault'} tone={f.laserOk ? 'ok' : 'crit'} />
-        <Row label="Optical receiver" value={f.rxPresent ? 'Light detected' : 'No light'} tone={f.rxPresent ? 'ok' : 'crit'} />
-        <Row label="Receiver type" value={settings.receiver === 'solar-panel' ? 'Solar panel' : 'Photodiode'} />
-        <Row label="Ambient light" value={`${f.ambientLux.toLocaleString('en-US')} lx`} tone={luxTone} />
-        <Row label="Carrying traffic" value={latest.activeChannel === 'FSO' ? 'Yes' : 'No, on RF fallback'}
-          tone={latest.activeChannel === 'FSO' ? 'ok' : 'warn'} />
-      </Panel>
-
-      <Panel title="RSSI and SNR, last 60 seconds" index={4} className="lg:col-span-12"
+      <Panel title={hw ? 'RSSI, last 60 seconds' : 'RSSI and SNR, last 60 seconds'} index={4} className="lg:col-span-12"
         right={
           <div className="hidden items-center gap-3 text-xs text-moss-600 sm:flex">
-            <span className="flex items-center gap-1.5"><span className="h-1 w-4 rounded bg-leaf-500" />RSSI (left)</span>
-            <span className="flex items-center gap-1.5"><span className="h-1 w-4 rounded bg-warn" />SNR in dB (right)</span>
+            <span className="flex items-center gap-1.5"><span className="h-1 w-4 rounded bg-leaf-500" />RSSI{hw ? '' : ' (left)'}</span>
+            {!hw && <span className="flex items-center gap-1.5"><span className="h-1 w-4 rounded bg-warn" />SNR in dB (right)</span>}
           </div>
         }>
-        <SignalTrend data={data} />
+        <SignalTrend data={data} hw={hw} />
       </Panel>
     </div>
   )
@@ -172,7 +191,45 @@ function FsoTab() {
 
 // ---------- RF tab ----------
 
-function RfTab() {
+// Real hardware: show what the unit's own LoRa module reports about its peer
+function RfTabHardware() {
+  const d = useDevice((s) => s.device)
+  const linked = useDevice((s) => s.deviceConnected)
+  const latest = useLink((s) => s.latest)!
+  if (!linked || !d) {
+    return (
+      <Panel title="LoRa radio" tone="crit" index={1}>
+        <p className="text-[15px]">No reports from the unit shown on the Hardware page.</p>
+      </Panel>
+    )
+  }
+  const heard = d.lora.peer !== '-' && d.lora.ageS >= 0
+  const stale = !heard || d.lora.ageS > 10
+  const tone: Tone = !d.lora.ok ? 'crit' : stale ? 'warn' : 'ok'
+  const active = latest.activeChannel === 'RF'
+  return (
+    <div className="grid gap-5 lg:grid-cols-12">
+      <Panel title={`LoRa radio (Unit ${d.unit})`} tone={tone} index={1} className="lg:col-span-6"
+        right={<Pill tone={tone}>{!d.lora.ok ? 'Module failed' : stale ? 'No peer' : 'Peer online'}</Pill>}>
+        <Big mono tone={heard ? rfTone(d.lora.rssi) : 'default'}>{heard ? d.lora.rssi : '--'}<span className="ml-2 text-2xl">dBm</span></Big>
+        <Sub>Signal of the last packet from the peer. Closer to 0 is stronger.</Sub>
+        <div className="mt-4">
+          <Row label="Peer" value={heard ? `Unit ${d.lora.peer}` : 'Not heard yet'} />
+          <Row label="SNR" value={heard ? `${d.lora.snr} dB` : 'Unknown'} />
+          <Row label="Last heard" value={d.lora.ageS < 0 ? 'Never' : `${d.lora.ageS}s ago`} tone={stale ? 'warn' : 'default'} />
+          <Row label="Packets sent / received" value={`${d.lora.tx} / ${d.lora.rx}`} />
+          <Row label="Carrying traffic" value={active ? 'Yes, the laser is down' : 'No, standby'} tone={active ? 'warn' : 'default'} />
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
+function RfTab({ hw }: { hw: boolean }) {
+  return hw ? <RfTabHardware /> : <RfTabSim />
+}
+
+function RfTabSim() {
   const latest = useLink((s) => s.latest)!
   const rf = latest.rf
   const active = latest.activeChannel === 'RF'
@@ -351,7 +408,11 @@ function PacketsTab() {
 export default function LinkDetails() {
   const latest = useLink((s) => s.latest)
   const connected = useLink((s) => s.connected)
+  const source = useLink((s) => s.source)
   const [tab, setTab] = useState<TabId>('fso')
+  const hw = source === 'hardware'
+  const tabs = hw ? TABS.filter((t) => t.id === 'fso' || t.id === 'rf') : TABS
+  const shown: TabId = tabs.some((t) => t.id === tab) ? tab : 'fso'
 
   if (!latest) {
     return (
@@ -374,12 +435,12 @@ export default function LinkDetails() {
         <Pill tone={latest.activeChannel === 'FSO' ? 'ok' : 'warn'}>Active: {latest.activeChannel}</Pill>
         <Pill tone={latest.linkState === 'Locked' ? 'ok' : latest.linkState === 'Failover' ? 'crit' : 'warn'}>{latest.linkState}</Pill>
       </Header>
-      <Tabs tab={tab} onChange={setTab} />
-      <div key={tab} role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
-        {tab === 'fso' && <FsoTab />}
-        {tab === 'rf' && <RfTab />}
-        {tab === 'transfer' && <TransferTab />}
-        {tab === 'packets' && <PacketsTab />}
+      <Tabs tab={shown} tabs={tabs} onChange={setTab} />
+      <div key={shown} role="tabpanel" id={`panel-${shown}`} aria-labelledby={`tab-${shown}`}>
+        {shown === 'fso' && <FsoTab hw={hw} />}
+        {shown === 'rf' && <RfTab hw={hw} />}
+        {shown === 'transfer' && <TransferTab />}
+        {shown === 'packets' && <PacketsTab />}
       </div>
     </div>
   )

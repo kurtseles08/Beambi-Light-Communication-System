@@ -86,6 +86,8 @@ const inputCls = 'rounded-lg border border-forest-900/15 bg-white px-3 py-1.5 te
 
 // ---------- page ----------
 
+const stamp = () => format(new Date(), 'yyyyMMdd-HHmmss')
+
 export default function Logs() {
   const latest = useLink((s) => s.latest)
   const connected = useLink((s) => s.connected)
@@ -95,6 +97,12 @@ export default function Logs() {
   const activeRun = useLink((s) => s.activeRun)
   const startRun = useLink((s) => s.startRun)
   const stopRun = useLink((s) => s.stopRun)
+
+  const source = useLink((s) => s.source)
+  const hw = source === 'hardware'
+  const metrics = hw ? METRICS.filter((m) => m.id === 'rssi') : METRICS // the firmware measures only the signal
+
+
 
   const [range, setRange] = useState<number>(15)
   const [metric, setMetric] = useState<MetricId>('rssi')
@@ -157,16 +165,16 @@ export default function Logs() {
 
   const begin = () => startRun(Math.min(100000, Math.max(0, Number(distance) || 0)), notes.trim())
 
-  const exportHistory = () =>
-    downloadCsv(`beambi-history-${format(Date.now(), 'yyyyMMdd-HHmmss')}.csv`,
+    const exportHistory = () =>
+    downloadCsv(`beambi-history-${stamp()}.csv`,
       ['time', 'channel', 'link_state', 'rssi', 'snr_db', 'ber_before_fec', 'ber_after_fec', 'latency_ms', 'bitrate_kbps', 'packet_loss_pct', 'ambient_lux', 'temperature_c', 'humidity_pct', 'battery_a_pct', 'battery_b_pct'],
       rows.map((s) => [new Date(s.ts).toISOString(), s.ch, s.state, s.rssi.toFixed(1), s.snr.toFixed(1), s.berPre, s.berPost, s.latencyMs.toFixed(0), s.bitrateKbps.toFixed(1), s.loss.toFixed(1), Math.round(s.lux), s.tempC, s.hum, s.batA, s.batB]))
   const exportEvents = () =>
-    downloadCsv(`beambi-events-${format(Date.now(), 'yyyyMMdd-HHmmss')}.csv`,
+    downloadCsv(`beambi-events-${stamp()}.csv`,
       ['time', 'severity', 'type', 'unit', 'duration_s', 'message'],
       matched.map((e: LinkEvent) => [new Date(e.ts).toISOString(), e.severity, e.type, e.unit ?? '', e.durationSec ?? '', e.message]))
   const exportRuns = () =>
-    downloadCsv(`beambi-runs-${format(Date.now(), 'yyyyMMdd-HHmmss')}.csv`,
+    downloadCsv(`beambi-runs-${stamp()}.csv`,
       ['started', 'ended', 'distance_m', 'notes', 'seconds', 'avg_rssi', 'min_rssi', 'max_rssi', 'avg_snr_db', 'delivery_pct', 'failovers', 'locked_pct'],
       runs.map((r) => [new Date(r.startedAt).toISOString(), r.endedAt ? new Date(r.endedAt).toISOString() : '', r.distanceM, r.notes, r.samples, r.avgRssi.toFixed(1), r.minRssi.toFixed(1), r.maxRssi.toFixed(1), r.avgSnr.toFixed(1), r.pdr.toFixed(1), r.failovers, r.lockedPct.toFixed(0)]))
 
@@ -175,15 +183,18 @@ export default function Logs() {
   return (
     <div className="space-y-6">
       <Header>
-        <label className="flex items-center gap-2 text-sm text-moss-600">Summary of
-          <select className={inputCls} value={picked ? scope : 'session'} onChange={(e) => setScope(e.target.value)}>
-            <option value="session">Whole session</option>
-            {activeRun && <option value="active">Active run ({activeRun.distanceM} m)</option>}
-            {runs.map((r) => (
-              <option key={r.id} value={r.id}>{format(r.startedAt, 'd MMM HH:mm')}, {r.distanceM} m</option>
-            ))}
-          </select>
-        </label>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-moss-600">
+          <label className="flex items-center gap-2">Summary of
+            <select className={inputCls} value={picked ? scope : 'session'} onChange={(e) => setScope(e.target.value)}>
+              <option value="session">Whole session</option>
+              {activeRun && <option value="active">Active run ({activeRun.distanceM} m)</option>}
+              {runs.map((r) => (
+                <option key={r.id} value={r.id}>{format(r.startedAt, 'd MMM HH:mm')}, {r.distanceM} m</option>
+              ))}
+            </select>
+          </label>
+          <span className="font-mono text-[12px] text-moss-600">{scopeLabel}</span>
+        </div>
       </Header>
 
       <div className="grid gap-5 lg:grid-cols-12">
@@ -203,10 +214,20 @@ export default function Logs() {
           <div className="mt-3"><Row label="Test runs" value={runs.length + (activeRun ? 1 : 0)} /></div>
         </Panel>
 
-        <Panel title="Packet delivery ratio" tone={pdrTone} index={3} className="lg:col-span-3" right={<Pill tone={pdrTone}>{pdr >= 95 ? 'Good' : pdr >= 80 ? 'Fair' : 'Poor'}</Pill>}>
-          <Big mono tone={pdrTone}>{pdr.toFixed(1)}%</Big>
-          <Sub>Frames delivered out of frames sent{picked ? ' during this run.' : ' this session.'}</Sub>
-          {!picked && <div className="mt-3"><Row label="Delivered / sent" value={`${recv.toLocaleString('en-US')} / ${sent.toLocaleString('en-US')}`} /></div>}
+        <Panel title="Packet delivery ratio" tone={hw ? 'default' : pdrTone} index={3} className="lg:col-span-3"
+          right={hw ? <Pill>Not measured</Pill> : <Pill tone={pdrTone}>{pdr >= 95 ? 'Good' : pdr >= 80 ? 'Fair' : 'Poor'}</Pill>}>
+          {hw ? (
+            <>
+              <Big mono>--</Big>
+              <Sub>The firmware does not count laser frames yet.</Sub>
+            </>
+          ) : (
+            <>
+              <Big mono tone={pdrTone}>{pdr.toFixed(1)}%</Big>
+              <Sub>Frames delivered out of frames sent{picked ? ' during this run.' : ' this session.'}</Sub>
+              {!picked && <div className="mt-3"><Row label="Delivered / sent" value={`${recv.toLocaleString('en-US')} / ${sent.toLocaleString('en-US')}`} /></div>}
+            </>
+          )}
         </Panel>
 
         <Panel title="Total uptime" index={4} className="lg:col-span-3" right={<Pill>{picked ? 'Run' : 'Session'}</Pill>}>
@@ -233,7 +254,7 @@ export default function Logs() {
           )}>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap gap-2" role="group" aria-label="Metric">
-              {METRICS.map((m) => <ChartTab key={m.id} active={metric === m.id} onClick={() => setMetric(m.id)}>{m.label}</ChartTab>)}
+              {metrics.map((m) => <ChartTab key={m.id} active={metric === m.id} onClick={() => setMetric(m.id)}>{m.label}</ChartTab>)}
             </div>
             <div className="flex flex-wrap gap-2" role="group" aria-label="Time range">
               {RANGES.map((r) => <ChartTab key={r.minutes} active={range === r.minutes} onClick={() => setRange(r.minutes)}>{r.label}</ChartTab>)}

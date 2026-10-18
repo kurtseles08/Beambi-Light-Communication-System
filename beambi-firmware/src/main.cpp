@@ -15,12 +15,19 @@
 #include <LoRa.h>
 #include <ArduinoJson.h>
 
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
+#include "secrets.h"
+
+
+
 // ----------------------------------------------------------------- pins
-constexpr int PIN_MIC = 13, PIN_PANEL = 35, PIN_LASER = 27, PIN_DAC = 25, PIN_LED = 2;
-constexpr int LORA_SS = 5, LORA_RST = 14, LORA_DIO0 = 26;
+constexpr int PIN_MIC = 32, PIN_PANEL = 35, PIN_LASER = 27, PIN_DAC = 25, PIN_LED = 2, PIN_BAT = 34;
+constexpr int LORA_SS = 5, LORA_RST = 14, LORA_DIO0 = 26;   // SCK 18, MISO 19, MOSI 23 are the default SPI pins
 
 // ----------------------------------------------------------------- LoRa settings (must match on every node)
-constexpr char     UNIT_ID    = 'A';        // A on one unit, B on the other
+constexpr char     UNIT_ID    = 'A';        // A on one unit, B on the other (CHANGE IT AFTER UPLOAD) 
 constexpr long     LORA_FREQ  = 433E6;      // SX1278 = 433 MHz band. Check local (NTC) rules.
 constexpr int      LORA_SF    = 7;
 constexpr long     LORA_BW    = 125E3;
@@ -29,6 +36,14 @@ constexpr int      LORA_POWER = 14;
 constexpr int      LORA_SYNC  = 0xB1;
 constexpr uint32_t HB_MS = 2000, HB_FAILOVER_MS = 1000;
 constexpr uint32_t LINK_UP_MS = 500, LINK_DOWN_MS = 3000;
+
+constexpr float PILOT_HZ  = 1000.0f;   // must be bin-aligned: PILOT_HZ * GZ_N / FS_HZ = 25
+constexpr float PILOT_AMP = 0.12f;     // pilot depth in the TX signal (0..1)
+constexpr int   GZ_N      = 200;       // 25 ms block
+constexpr float GZ_COEFF  = 1.41421356f; // 2*cos(2*pi*25/200)
+static float pilotPhase = 0, gz1 = 0, gz2 = 0;
+static int   gzN = 0;
+static volatile float pilotEnvOut = 0;
 
 // ----------------------------------------------------------------- audio tunables
 constexpr int      FS_HZ          = 8000;
@@ -77,6 +92,27 @@ static volatile uint32_t panSum = 0, panCnt = 0;
 static volatile uint32_t overruns = 0, workMax = 0, workSum = 0, workCnt = 0;
 static const uint32_t MAXD = (1u << LASER_PWM_BITS) - 1;
 
+
+// ----------------------------------------------------------------- battery: 9V alkaline on PIN_BAT through 330k / 100k
+constexpr bool  HAVE_BATTERY = true;   // set false if no divider is wired
+constexpr float BAT_DIV      = 4.3f;   // (330k + 100k) / 100k
+static volatile float batMv = 0;       // filtered millivolts at the pin, written by the sample task
+
+static float batVolts() { return (HAVE_BATTERY && batMv > 0) ? (batMv / 1000.0f) * BAT_DIV : -1.0f; }
+static int batPercent(float v) {       // 9V alkaline under load, rough
+  static const float V[] = {6.0f, 6.6f, 7.2f, 7.8f, 8.4f, 9.0f};
+  static const int   P[] = {0, 10, 25, 50, 75, 100};
+  if (v <= V[0]) return 0;
+  if (v >= V[5]) return 100;
+  for (int i = 1; i < 6; i++)
+    if (v <= V[i]) return (int)(P[i-1] + (P[i] - P[i-1]) * (v - V[i-1]) / (V[i] - V[i-1]));
+  return 100;
+}
+
+
+
+
+
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   static inline void laserInit() { ledcAttach(PIN_LASER, LASER_PWM_HZ, LASER_PWM_BITS); }
   static inline void laserWrite(uint32_t d) { ledcWrite(PIN_LASER, d); }
@@ -109,6 +145,14 @@ static void sampleLoop(void *) {
 
     rxDc += DC_TRACK * ((float)rawPan - rxDc);
     float y = rxHpf.process(((float)rawPan - rxDc) / 2048.0f);
+    float gs = y + GZ_COEFF * gz1 - gz2; gz2 = gz1; gz1 = gs;
+if (++gzN >= GZ_N) {
+  float p = gz1*gz1 + gz2*gz2 - GZ_COEFF*gz1*gz2;
+  float amp = 2.0f * sqrtf(fmaxf(p, 0.0f)) / GZ_N;          // pilot amplitude, full-scale units
+  pilotEnvOut += 0.4f * (clampf(amp * rxGain, 0.0f, 1.0f) - pilotEnvOut);
+  gz1 = gz2 = 0; gzN = 0;
+}
+
     float ra = clampf(y * rxGain, -1.0f, 1.0f);
     rxEnv += 0.002f * (fabsf(ra) - rxEnv);
     rxEnvOut = rxEnv;
@@ -133,7 +177,11 @@ static void sampleLoop(void *) {
 
     float duty = 0, t = 0;
     int src = txSrc;
-    if (src == 4) { t = clampf(m * micGain * gateG * duckG, -1.0f, 1.0f); duty = TX_BIAS + TX_DEPTH * t; }
+    if (src == 4) {
+  pilotPhase += 2.0f*(float)M_PI*PILOT_HZ/FS_HZ; if (pilotPhase > 6.2831853f) pilotPhase -= 6.2831853f;
+  t = clampf(m * micGain * gateG * duckG + PILOT_AMP * sinf(pilotPhase), -1.0f, 1.0f);
+  duty = TX_BIAS + TX_DEPTH * t;
+}
     else if (src == 3) { t = 0.8f * sinf(tonePhase); tonePhase += 2.0f*(float)M_PI*1000.0f/FS_HZ;
                          if (tonePhase > 6.2831853f) tonePhase -= 6.2831853f; duty = TX_BIAS + TX_DEPTH * t; }
     else if (src == 2) { duty = (((tick / (FS_HZ / 4)) & 1) ? TX_BIAS + TX_DEPTH : TX_BIAS - TX_DEPTH); }
@@ -142,6 +190,12 @@ static void sampleLoop(void *) {
     duty = clampf(duty, 0.0f, 1.0f);
     laserWrite((uint32_t)(duty * (float)MAXD));
     tick++;
+
+if (HAVE_BATTERY && (tick & 0x3FF) == 0) {   // about every 128 ms, ADC only used from this task
+      float mv = (float)analogReadMilliVolts(PIN_BAT);
+      batMv = (batMv == 0) ? mv : batMv + 0.1f * (mv - batMv);
+    }
+
 
     uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
     workSum += dt; workCnt++;
@@ -160,6 +214,76 @@ static void printJsonStr(const char *s) {
   }
   Serial.print('"');
 }
+
+
+// ----------------------------------------------------------------- Wi-Fi reporting (own task, never touches the audio task)
+struct NetMsg { char s[520]; };
+struct CmdMsg { char s[160]; };
+static QueueHandle_t netQ = nullptr, cmdQ = nullptr;
+static Preferences prefs;
+
+static void netPush(const char *json) {          // queue one JSON line for the Wi-Fi task
+  if (!netQ) return;
+  NetMsg m; strlcpy(m.s, json, sizeof m.s);
+  xQueueSend(netQ, &m, 0);                       // queue full: drop, the next status replaces it
+}
+
+static bool netPost(const char *json) {
+  HTTPClient http;
+  String url = String("http://") + SERVER_HOST + ":" + String(SERVER_PORT) + "/api/device";
+  if (!http.begin(url)) return false;
+  http.setTimeout(2000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-api-key", DEVICE_KEY);
+  int code = http.POST((uint8_t *)json, strlen(json));
+  static int lastCode = 0;
+  if (code != lastCode) { lastCode = code; Serial.print(F("# NET post -> ")); Serial.println(code); }
+  if (code == 200) {
+    JsonDocument d;
+    if (!deserializeJson(d, http.getString())) {
+      for (JsonObject c : d["cmds"].as<JsonArray>()) {   // commands from the dashboard
+        CmdMsg m; serializeJson(c, m.s, sizeof m.s);
+        xQueueSend(cmdQ, &m, 0);
+      }
+    }
+  }
+  http.end();
+  return code == 200;
+}
+
+static void netTask(void *) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  bool wasUp = false, sayHello = true;
+  uint32_t lastTry = millis();
+  for (;;) {
+    bool up = WiFi.status() == WL_CONNECTED;
+    if (up != wasUp) {
+      wasUp = up;
+      if (up) { Serial.print(F("# WIFI connected, IP ")); Serial.println(WiFi.localIP()); sayHello = true; }
+      else Serial.println(F("# WIFI lost, retrying"));
+    }
+    if (!up) {
+      if (millis() - lastTry > 15000) { lastTry = millis(); WiFi.disconnect(); WiFi.begin(WIFI_SSID, WIFI_PASS); }
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+    if (sayHello) {                               // announce the unit, so the dashboard logs it
+      JsonDocument d; char u[2] = {UNIT_ID, 0};
+      d["t"] = "hello"; d["unit"] = u; d["fw"] = "0.3-wifi";
+      char h[96]; serializeJson(d, h, sizeof h);
+      if (netPost(h)) { sayHello = false; xQueueReset(netQ); }
+      else { vTaskDelay(pdMS_TO_TICKS(2000)); continue; }
+    }
+    NetMsg m;
+    if (xQueueReceive(netQ, &m, pdMS_TO_TICKS(500)) == pdTRUE) {
+      if (!netPost(m.s)) sayHello = true;
+    }
+  }
+}
+
+
 
 // ----------------------------------------------------------------- LoRa side
 static bool     loraOk = false;
@@ -180,6 +304,22 @@ static void loraSend(char type, const char *payload) {
   txCount++;
 }
 
+
+
+static void netPushMsg(char from, const char *text) {
+  JsonDocument d; char u[2] = {UNIT_ID, 0}, f[2] = {from, 0};
+  d["t"] = "lora_msg"; d["unit"] = u; d["from"] = f; d["rssi"] = lastRssi; d["snr"] = lastSnr; d["text"] = text;
+  char out[300]; serializeJson(d, out, sizeof out); netPush(out);
+}
+static void netPushPong(char from, const char *seq) {
+  JsonDocument d; char u[2] = {UNIT_ID, 0}, f[2] = {from, 0};
+  d["t"] = "pong"; d["unit"] = u; d["from"] = f; d["seq"] = seq; d["rssi"] = lastRssi; d["snr"] = lastSnr;
+  char out[200]; serializeJson(d, out, sizeof out); netPush(out);
+}
+
+
+
+
 static void loraHandle(char *buf) {
   if (strncmp(buf, "BB:", 3) != 0 || strlen(buf) < 7 || buf[4] != ':' || buf[6] != ':') return;
   char from = buf[3], type = buf[5]; const char *payload = buf + 7;
@@ -188,11 +328,13 @@ static void loraHandle(char *buf) {
   if (type == 'H') peerLaserUp = (strncmp(payload, "up", 2) == 0);
   else if (type == 'M') {
     Serial.printf("{\"t\":\"lora_msg\",\"from\":\"%c\",\"rssi\":%d,\"snr\":%.1f,\"text\":", from, lastRssi, lastSnr);
+    netPushMsg(from, payload);
     printJsonStr(payload); Serial.println('}');
   }
   else if (type == 'P') { char r[24]; snprintf(r, sizeof r, "%s", payload); loraSend('R', r); }
   else if (type == 'R') {
     Serial.printf("{\"t\":\"pong\",\"from\":\"%c\",\"seq\":\"%s\",\"rssi\":%d,\"snr\":%.1f}\n", from, payload, lastRssi, lastSnr);
+    netPushPong(from, payload);
   }
 }
 
@@ -208,13 +350,16 @@ static void loraPoll() {
 }
 
 static void updatePath(uint32_t now) {
-  float env = rxEnvOut;
+  float env = pilotEnvOut;
   if (calEndMs) {
     calSum += env; calCount++;
     if (now >= calEndMs) {
       calEndMs = 0;
       float mean = calCount ? calSum / (float)calCount : 0;
       linkThresh = fmaxf(mean * 2.0f, 0.02f);
+       prefs.putFloat("thr", (float)linkThresh);   // survive a reboot (battery swap, power loss)
+      { JsonDocument d; char u[2] = {UNIT_ID, 0}; d["t"] = "cal"; d["unit"] = u; d["mean"] = mean; d["thr"] = (float)linkThresh;
+        char o[120]; serializeJson(d, o, sizeof o); netPush(o); }
       Serial.printf("{\"t\":\"cal\",\"mean\":%.4f,\"thr\":%.4f}\n", mean, (float)linkThresh);
       forceStatus = true;
     }
@@ -235,19 +380,21 @@ static void updatePath(uint32_t now) {
 // ----------------------------------------------------------------- status line (1 Hz, or right after a command)
 static void emitStatus(uint32_t now) {
   uint32_t wc = workCnt;
+  float bv = batVolts(); int bp = bv < 0 ? -1 : batPercent(bv);
   char b[512];
   snprintf(b, sizeof b,
     "{\"t\":\"status\",\"unit\":\"%c\",\"up\":%lu,\"laser\":%d,\"env\":%.4f,\"thr\":%.4f,\"mode\":%d,\"failover\":%d,"
     "\"tx\":%d,\"rx\":%d,\"vol\":%.2f,\"rxGain\":%.2f,\"micGain\":%.2f,\"duck\":%d,\"gate\":%d,"
     "\"micP2P\":%d,\"panP2P\":%d,\"workAvg\":%u,\"workMax\":%u,\"over\":%u,\"cal\":%d,"
-    "\"lora\":{\"ok\":%d,\"peer\":\"%c\",\"peerLaser\":%d,\"ageS\":%ld,\"rssi\":%d,\"snr\":%.1f,\"tx\":%u,\"rx\":%u}}",
-    UNIT_ID, (unsigned long)(now / 1000), laserLinkUp ? 1 : 0, (float)rxEnvOut, (float)linkThresh, pathMode, failover ? 1 : 0,
+    "\"lora\":{\"ok\":%d,\"peer\":\"%c\",\"peerLaser\":%d,\"ageS\":%ld,\"rssi\":%d,\"snr\":%.1f,\"tx\":%u,\"rx\":%u},\"batV\":%.2f,\"batPct\":%d}",
+    UNIT_ID, (unsigned long)(now / 1000), laserLinkUp ? 1 : 0, (float)pilotEnvOut, (float)linkThresh, pathMode, failover ? 1 : 0,
     (int)txSrc, (int)rxSink, (float)vol, (float)rxGain, (float)micGain, duckOn ? 1 : 0, gateOn ? 1 : 0,
     (int)(micMax - micMin), (int)(panMax - panMin), wc ? (unsigned)(workSum / wc) : 0, (unsigned)workMax, (unsigned)overruns,
     calEndMs ? 1 : 0,
     loraOk ? 1 : 0, lastPeer, peerLaserUp ? 1 : 0, lastPeerMs ? (long)((now - lastPeerMs) / 1000) : -1L,
-    lastRssi, lastSnr, (unsigned)txCount, (unsigned)rxCount);
+    lastRssi, lastSnr, (unsigned)txCount, (unsigned)rxCount, bv, bp);
   Serial.println(b);
+  netPush(b);
 }
 
 // ----------------------------------------------------------------- input: keys, >text, and JSON commands
@@ -328,6 +475,8 @@ static void serialPoll() {
 
 // ----------------------------------------------------------------- setup / loop
 void setup() {
+  prefs.begin("beambi", false);
+  linkThresh = prefs.getFloat("thr", 0.10f);
   Serial.begin(115200);
   delay(300);
   pinMode(PIN_LED, OUTPUT);
@@ -361,12 +510,17 @@ void setup() {
 #endif
   Serial.printf("{\"t\":\"hello\",\"unit\":\"%c\",\"fw\":\"0.2\",\"loraOk\":%d}\n", UNIT_ID, loraOk ? 1 : 0);
   Serial.println(F("# BeamBi unit ready. Send h for commands."));
+
+netQ = xQueueCreate(8, sizeof(NetMsg));
+  cmdQ = xQueueCreate(6, sizeof(CmdMsg));
+  xTaskCreatePinnedToCore(netTask, "net", 10240, nullptr, 1, nullptr, 1);
 }
 
 void loop() {
   static uint32_t last = 0;
   uint32_t now = millis();
   serialPoll();
+  { CmdMsg c; while (cmdQ && xQueueReceive(cmdQ, &c, 0) == pdTRUE) handleJson(c.s); }
   loraPoll();
   updatePath(now);
 

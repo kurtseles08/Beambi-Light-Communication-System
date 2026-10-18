@@ -1,8 +1,19 @@
 import { useState } from "react";
-import { sendCommand, useDevice } from "./deviceStore";
+import {
+  selectUnit,
+  sendCommand,
+  setApplyBoth,
+  useDevice,
+} from "./deviceStore";
 import Panel from "../components/Panel";
 import { Bar, Pill, Row, Sub, type Tone } from "../components/ui";
-import type { DeviceCommand } from "../types";
+import type {
+  DeviceCommand,
+  DeviceStatus,
+  LoraMessage,
+  PongRecord,
+  UnitId,
+} from "../types";
 
 type SetKey = Extract<DeviceCommand, { cmd: "set" }>["k"];
 const btn =
@@ -45,6 +56,7 @@ function Slider({
   step,
   value,
   disabled,
+  send,
 }: {
   label: string;
   k: SetKey;
@@ -53,11 +65,12 @@ function Slider({
   step: number;
   value: number;
   disabled: boolean;
+  send: (c: DeviceCommand) => void;
 }) {
   const [local, setLocal] = useState<number | null>(null);
   const commit = () => {
     if (local !== null) {
-      sendCommand({ cmd: "set", k, v: local });
+      send({ cmd: "set", k, v: local });
       setLocal(null);
     }
   };
@@ -105,40 +118,78 @@ function Message({
   );
 }
 
-export default function HardwarePage() {
-  const {
-    backendUp,
-    source,
-    device: d,
-    deviceConnected,
-    canCommand,
-    loraLog,
-    pongs,
-    lastError,
-  } = useDevice();
+function UnitTabs({
+  selected,
+  online,
+  onPick,
+}: {
+  selected: UnitId;
+  online: Record<UnitId, boolean>;
+  onPick: (u: UnitId) => void;
+}) {
+  return (
+    <div role="tablist" aria-label="Unit" className="flex flex-wrap gap-2">
+      {(["A", "B"] as UnitId[]).map((u) => (
+        <button
+          key={u}
+          role="tab"
+          aria-selected={selected === u}
+          onClick={() => onPick(u)}
+          className={selected === u ? btnOn : btn}
+        >
+          <span
+            className={`mr-2 inline-block h-2.5 w-2.5 rounded-full ${online[u] ? "bg-leaf-500" : "bg-crit"}`}
+          />
+          Unit {u}
+          <span className="ml-2 text-xs opacity-70">
+            {online[u] ? "online" : "offline"}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function UnitView({
+  d,
+  selected,
+  online,
+  applyBoth,
+  dis,
+  loraLog,
+  pongs,
+}: {
+  d: DeviceStatus;
+  selected: UnitId;
+  online: Record<UnitId, boolean>;
+  applyBoth: boolean;
+  dis: boolean;
+  loraLog: LoraMessage[];
+  pongs: PongRecord[];
+}) {
   const [text, setText] = useState("");
+  const other: UnitId = selected === "A" ? "B" : "A";
 
-  if (!backendUp)
-    return (
-      <Message title="Backend offline" tone="crit">
-        Cannot reach the backend. Is it running on port 4000?
-      </Message>
-    );
-  if (source !== "hardware")
-    return (
-      <Message title="Simulator mode" tone="warn">
-        Set DATA_SOURCE=hardware in backend/.env and restart the backend.
-      </Message>
-    );
-  if (!deviceConnected || !d)
-    return (
-      <Message title="Device disconnected" tone="crit">
-        Check the USB cable, SERIAL_PATH, and that no other program (Serial
-        Monitor, Arduino IDE) is using the port.
-      </Message>
-    );
+  // Shared settings go to both units when the switch is on. Calibrate, ping and
+  // message always go to the unit being viewed.
+  const sendShared = (c: DeviceCommand) =>
+    sendCommand(c, applyBoth ? "both" : selected);
+  const sendUnit = (c: DeviceCommand) => sendCommand(c, selected);
 
-  const dis = !canCommand;
+  const copyToOther = () => {
+    const cmds: DeviceCommand[] = [
+      { cmd: "set", k: "txSrc", v: d.tx },
+      { cmd: "set", k: "rxSink", v: d.rx },
+      { cmd: "set", k: "vol", v: d.vol },
+      { cmd: "set", k: "rxGain", v: d.rxGain },
+      { cmd: "set", k: "micGain", v: d.micGain },
+      { cmd: "set", k: "duck", v: d.duck },
+      { cmd: "set", k: "gate", v: d.gate },
+      { cmd: "mode", v: d.mode as 0 | 1 | 2 },
+    ];
+    cmds.forEach((c) => sendCommand(c, other));
+  };
+
   const locked = d.laser === 1 && d.failover === 0;
   const stateText = d.failover
     ? d.laser
@@ -154,25 +205,14 @@ export default function HardwarePage() {
   const heard = d.lora.peer !== "-" && d.lora.ageS >= 0;
   const stale = !heard || d.lora.ageS > 10;
   const last = pongs.at(-1);
+  const haveBat = d.batV !== undefined && d.batV > 0;
+  const haveBatPct = d.batPct !== undefined && d.batPct >= 0;
 
   return (
-    <div className="space-y-6">
-      <div className="rise">
-        <h1 className="text-3xl font-bold">Hardware</h1>
-        <p className="mt-1 text-[15px] text-moss-600">
-          Unit {d.unit} · firmware up {d.up}s · live from the ESP32
-        </p>
-      </div>
-      {!canCommand && (
-        <div className="rounded-xl border border-warn bg-warn/15 p-3 text-sm text-warn-ink">
-          Read-only: the frontend token does not match COMMAND_TOKEN.
-        </div>
-      )}
-      {lastError && (
-        <div className="rounded-xl border border-crit bg-crit/15 p-3 text-sm text-crit-ink">
-          Last command failed: {lastError}
-        </div>
-      )}
+    <>
+      <p className="text-[15px] text-moss-600">
+        Unit {d.unit} · firmware up {d.up}s · live from the ESP32
+      </p>
 
       <div className="grid gap-5 lg:grid-cols-12">
         <Panel
@@ -218,12 +258,24 @@ export default function HardwarePage() {
 
         <Panel title="Controls" index={2} className="lg:col-span-6">
           <div className="space-y-4">
+            <div className="rounded-xl border border-forest-900/15 bg-mint-50 p-3 text-[13px] leading-snug text-moss-600">
+              {applyBoth
+                ? `Gain, volume, TX source and path mode go to both units. Calibrate, ping and message go to Unit ${selected} only.`
+                : `Changes go to Unit ${selected} only.`}
+              <button
+                disabled={dis || !online[other]}
+                className={`${btn} mt-2 block`}
+                onClick={copyToOther}
+              >
+                Copy these settings to Unit {other}
+              </button>
+            </div>
             <div>
               <div className="mb-1.5 text-sm text-moss-600">TX source</div>
               <Segmented
                 disabled={dis}
                 value={d.tx}
-                onPick={(v) => sendCommand({ cmd: "set", k: "txSrc", v })}
+                onPick={(v) => sendShared({ cmd: "set", k: "txSrc", v })}
                 options={[
                   [4, "Mic"],
                   [3, "Tone"],
@@ -238,7 +290,7 @@ export default function HardwarePage() {
               <Segmented
                 disabled={dis}
                 value={d.rx}
-                onPick={(v) => sendCommand({ cmd: "set", k: "rxSink", v })}
+                onPick={(v) => sendShared({ cmd: "set", k: "rxSink", v })}
                 options={[
                   [0, "Panel"],
                   [1, "Tone"],
@@ -254,6 +306,7 @@ export default function HardwarePage() {
               step={0.05}
               value={d.vol}
               disabled={dis}
+              send={sendShared}
             />
             <Slider
               label="RX gain"
@@ -263,6 +316,7 @@ export default function HardwarePage() {
               step={1}
               value={d.rxGain}
               disabled={dis}
+              send={sendShared}
             />
             <Slider
               label="Mic gain"
@@ -272,13 +326,14 @@ export default function HardwarePage() {
               step={0.5}
               value={d.micGain}
               disabled={dis}
+              send={sendShared}
             />
             <div className="flex gap-2">
               <button
                 disabled={dis}
                 className={d.duck ? btnOn : btn}
                 onClick={() =>
-                  sendCommand({ cmd: "set", k: "duck", v: d.duck ? 0 : 1 })
+                  sendShared({ cmd: "set", k: "duck", v: d.duck ? 0 : 1 })
                 }
               >
                 Duck
@@ -287,7 +342,7 @@ export default function HardwarePage() {
                 disabled={dis}
                 className={d.gate ? btnOn : btn}
                 onClick={() =>
-                  sendCommand({ cmd: "set", k: "gate", v: d.gate ? 0 : 1 })
+                  sendShared({ cmd: "set", k: "gate", v: d.gate ? 0 : 1 })
                 }
               >
                 Gate
@@ -298,7 +353,7 @@ export default function HardwarePage() {
               <Segmented
                 disabled={dis}
                 value={d.mode}
-                onPick={(v) => sendCommand({ cmd: "mode", v: v as 0 | 1 | 2 })}
+                onPick={(v) => sendShared({ cmd: "mode", v: v as 0 | 1 | 2 })}
                 options={[
                   [0, "Auto"],
                   [1, "Laser"],
@@ -309,9 +364,11 @@ export default function HardwarePage() {
             <button
               disabled={dis || d.cal === 1}
               className={btn}
-              onClick={() => sendCommand({ cmd: "cal" })}
+              onClick={() => sendUnit({ cmd: "cal" })}
             >
-              {d.cal ? "Calibrating (3 s)..." : "Calibrate link threshold"}
+              {d.cal
+                ? "Calibrating (3 s)..."
+                : `Calibrate link threshold (Unit ${selected})`}
             </button>
             {d.cal === 1 && (
               <p className="text-xs text-warn-ink">
@@ -322,7 +379,7 @@ export default function HardwarePage() {
         </Panel>
 
         <Panel
-          title="LoRa"
+          title={`LoRa (Unit ${selected})`}
           tone={!d.lora.ok ? "crit" : stale ? "warn" : "ok"}
           index={3}
           className="lg:col-span-6"
@@ -354,7 +411,7 @@ export default function HardwarePage() {
             <button
               disabled={dis}
               className={btn}
-              onClick={() => sendCommand({ cmd: "ping" })}
+              onClick={() => sendUnit({ cmd: "ping" })}
             >
               Ping peer
             </button>
@@ -369,21 +426,24 @@ export default function HardwarePage() {
               value={text}
               maxLength={40}
               onChange={(e) => setText(e.target.value)}
-              placeholder="Message (max 40 characters)"
+              placeholder={`Message from Unit ${selected} (max 40 characters)`}
               className="flex-1 rounded-lg border border-forest-900/15 bg-white px-2.5 py-1.5 text-sm"
             />
             <button
               disabled={dis || !text.trim()}
               className={btn}
               onClick={() => {
-                sendCommand({ cmd: "msg", text });
+                sendUnit({ cmd: "msg", text });
                 setText("");
               }}
             >
               Send
             </button>
           </div>
-          <ul className="mt-3 max-h-40 space-y-1 overflow-auto text-sm">
+          <p className="mt-3 text-xs text-moss-600">
+            Messages received by either unit appear in this list.
+          </p>
+          <ul className="mt-1 max-h-40 space-y-1 overflow-auto text-sm">
             {loraLog.length === 0 && (
               <li className="text-moss-600">No messages received yet.</li>
             )}
@@ -398,7 +458,24 @@ export default function HardwarePage() {
           </ul>
         </Panel>
 
-        <Panel title="Device health" index={4} className="lg:col-span-6">
+        <Panel
+          title={`Device health (Unit ${selected})`}
+          index={4}
+          className="lg:col-span-6"
+        >
+          {haveBat && (
+            <Row
+              label="Battery"
+              value={`${d.batV!.toFixed(2)} V${haveBatPct ? ` · ${d.batPct}%` : ""}`}
+              tone={
+                haveBatPct && d.batPct! <= 10
+                  ? "crit"
+                  : haveBatPct && d.batPct! <= 20
+                    ? "warn"
+                    : "default"
+              }
+            />
+          )}
           <Row
             label="Mic peak-to-peak"
             value={d.micP2P}
@@ -431,6 +508,100 @@ export default function HardwarePage() {
           </Sub>
         </Panel>
       </div>
+    </>
+  );
+}
+
+export default function HardwarePage() {
+  const {
+    backendUp,
+    source,
+    devices,
+    unitsOnline,
+    selected,
+    applyBoth,
+    canCommand,
+    loraLog,
+    pongs,
+    lastError,
+  } = useDevice();
+
+  if (!backendUp)
+    return (
+      <Message title="Backend offline" tone="crit">
+        Cannot reach the backend. Is it running on port 4000?
+      </Message>
+    );
+  if (source !== "hardware")
+    return (
+      <Message title="Simulator mode" tone="warn">
+        Set DATA_SOURCE=hardware in backend/.env and restart the backend.
+      </Message>
+    );
+  if (!unitsOnline.A && !unitsOnline.B)
+    return (
+      <Message title="No unit connected" tone="crit">
+        No reports from Unit A or Unit B. Wi-Fi: check that each unit has power,
+        joined the Wi-Fi, and that DEVICE_KEY matches. USB: check the cable and
+        SERIAL_PATH, and that no other program (Serial Monitor, Arduino IDE) is
+        using the port.
+      </Message>
+    );
+
+  const d = devices[selected];
+
+  return (
+    <div className="space-y-6">
+      <div className="rise space-y-3">
+        <h1 className="text-3xl font-bold">Hardware</h1>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <UnitTabs
+            selected={selected}
+            online={unitsOnline}
+            onPick={selectUnit}
+          />
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={applyBoth}
+              onChange={(e) => setApplyBoth(e.target.checked)}
+              className="h-4 w-4 accent-leaf-600"
+            />
+            Apply to both units
+          </label>
+        </div>
+      </div>
+      {!canCommand && (
+        <div className="rounded-xl border border-warn bg-warn/15 p-3 text-sm text-warn-ink">
+          Read-only: the frontend token does not match COMMAND_TOKEN.
+        </div>
+      )}
+      {lastError && (
+        <div className="rounded-xl border border-crit bg-crit/15 p-3 text-sm text-crit-ink">
+          Last command failed: {lastError}
+        </div>
+      )}
+
+      {!d ? (
+        <Panel title={`Unit ${selected} is offline`} tone="crit" index={1}>
+          <p className="text-[15px]">
+            No report from Unit {selected} for 5 seconds. Check its power and
+            Wi-Fi (or the USB cable). The other unit is still available on its
+            tab.
+          </p>
+        </Panel>
+      ) : (
+        <UnitView
+          key={selected}
+          d={d}
+          selected={selected}
+          online={unitsOnline}
+          applyBoth={applyBoth}
+          dis={!canCommand}
+          loraLog={loraLog}
+          pongs={pongs}
+        />
+      )}
     </div>
   );
 }
