@@ -5,8 +5,6 @@ export const DEFAULT_SETTINGS: Settings = {
   mode: 'auto',
   failBelow: 30,
   lockAbove: 50,
-  failDelaySec: 2,
-  recoverHoldSec: 5,
   clearRssi: 82,
   lowBatteryPct: 20,
   critBatteryPct: 10,

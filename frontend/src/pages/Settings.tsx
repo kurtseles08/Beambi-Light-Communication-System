@@ -116,23 +116,21 @@ export default function Settings() {
 
       <div className="grid gap-5 lg:grid-cols-12">
         {/* Failover thresholds (read-only) */}
-        <Panel title="Failover thresholds" index={1} className="lg:col-span-6">
-          <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
-          <div className="mt-3">
-            <Slider label="Failover below (RSSI)" value={s.failBelow} min={5} max={Math.min(80, s.lockAbove - 5)}
-              hint="If the signal stays under this, the link switches to LoRa." />
-            <Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={Math.max(10, s.failBelow + 5)} max={95}
-              hint="The link counts as Locked above this, and the laser is trusted again." />
-            <Slider label="Failover delay" value={s.failDelaySec} min={1} max={30} unit=" s"
-              hint="How long the signal must stay low before switching. Avoids switching on a brief dip." />
-            <Slider label="Recovery hold" value={s.recoverHoldSec} min={1} max={60} unit=" s"
-              hint="How long the signal must stay good before going back to the laser." />
-          </div>
-          <Row label="Hysteresis band" value={`${s.lockAbove - s.failBelow} pts`} />
-          <p className="mt-2 text-[13px] leading-snug text-moss-600">
-            The gap between the two levels stops the link from flipping back and forth when the signal sits near one of them.
-          </p>
-        </Panel>
+        <Panel title="Signal zones" index={1} className="lg:col-span-6">
+  <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
+  <div className="mt-3">
+    <Slider label="Failover below (RSSI)" value={s.failBelow} min={5} max={Math.min(80, s.lockAbove - 5)}
+      hint="Colors the signal red below this. Set it to the reading where the unit really switches to LoRa."
+      onChange={(v) => update({ failBelow: v })} />
+    <Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={Math.max(10, s.failBelow + 5)} max={95}
+      hint="Counts as Locked at or above this. Used for colors, alignment advice and test runs."
+      onChange={(v) => update({ lockAbove: v })} />
+  </div>
+  <Row label="Band between the zones" value={`${s.lockAbove - s.failBelow} pts`} />
+  <p className="mt-2 text-[13px] leading-snug text-moss-600">
+    These are display zones only. The units decide when to switch, using the threshold set by Calibrate on the Hardware page.
+  </p>
+</Panel>
 
         {/* Failover mode */}
         <Panel title="Failover mode" tone={manual ? 'warn' : 'ok'} index={2} className="lg:col-span-6"

@@ -515,7 +515,6 @@ function UnitView({
 export default function HardwarePage() {
   const {
     backendUp,
-    source,
     devices,
     unitsOnline,
     selected,
@@ -530,12 +529,6 @@ export default function HardwarePage() {
     return (
       <Message title="Backend offline" tone="crit">
         Cannot reach the backend. Is it running on port 4000?
-      </Message>
-    );
-  if (source !== "hardware")
-    return (
-      <Message title="Simulator mode" tone="warn">
-        Set DATA_SOURCE=hardware in backend/.env and restart the backend.
       </Message>
     );
   if (!unitsOnline.A && !unitsOnline.B)

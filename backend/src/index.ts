@@ -9,8 +9,8 @@ import { loadSettings, sanitize, saveSettings } from './settings.js'
 import { createHardware, type UnitReport } from './hardware.js'
 import { createSerialBridge, type DeviceBridge } from './serial.js'
 import type {
-  DeviceCommand, DeviceStatus, FilteredEvent, LinkLog, LinkEvent, LoraMessage, MessageRecord,
-  PacketRecord, PongRecord, Reading, Settings, UnitId, UnitTotals,
+  DeviceCommand, DeviceStatus, LinkEvent, LoraMessage,
+  PongRecord, Reading, Settings, UnitId,
 } from './types.js'
 
 const TICK_MS = 1000
@@ -46,11 +46,6 @@ let bridge: DeviceBridge | null = null
 
 // Voice messages and packet logs are not reported by the firmware yet.
 // They stay empty so the dashboard's init payload keeps its shape.
-const noMessages: MessageRecord[] = []
-const noFiltered: FilteredEvent[] = []
-const noPackets: PacketRecord[] = []
-const emptyTotals = (): UnitTotals => ({ received: 0, accuracySum: 0, stutter: 0, ambient: 0 })
-const totals: Record<UnitId, UnitTotals> = { A: emptyTotals(), B: emptyTotals() }
 
 // ---------------------------------------------------------------- server
 const app = express()
@@ -251,9 +246,8 @@ io.on('connection', (socket) => {
   const canCommand = !COMMAND_TOKEN || socket.handshake.auth?.token === COMMAND_TOKEN
 
   socket.emit('init', {
-    readings, events: store.events, packets: noPackets, messages: noMessages, filtered: noFiltered, totals,
-    runs: store.runs, activeRun: store.activeRun(), settings, scenario: 'clear', source: 'hardware',
-    persistence: store.persistence, device, deviceConnected, loraLog, pongs, canCommand, devices, unitsOnline,
+    readings, events: store.events, runs: store.runs, activeRun: store.activeRun(),
+    device, deviceConnected, loraLog, pongs, canCommand, devices, unitsOnline,
   })
 
   socket.on('device:command', (raw, target?: unknown) => {
