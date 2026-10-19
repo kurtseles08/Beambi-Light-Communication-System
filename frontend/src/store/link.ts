@@ -13,7 +13,6 @@ type Init = {
   runs?: Run[]
   activeRun?: Run | null
   settings: Settings
-  source: string
 }
 
 type LinkStore = {
@@ -55,7 +54,6 @@ export const useLink = create<LinkStore>((set, get) => ({
         runs: d.runs ?? [],
         activeRun: d.activeRun ?? null,
         settings: { ...DEFAULT_SETTINGS, ...d.settings },
-        source: d.source,
         latest: d.readings.at(-1) ?? null,
       }),
     )

@@ -91,14 +91,11 @@ export type Settings = {
   lockAbove: number // "Locked" at or above this; also the recovery level
   failDelaySec: number
   recoverHoldSec: number
-  maxFrameLoss: number // % frame loss that also triggers failover
   clearRssi: number // calibration: RSSI in clear air
-  ambientWarnLux: number
-  ambientCritLux: number
   lowBatteryPct: number
   critBatteryPct: number
   receiver: Receiver
-  }
+}
 
 // One history point every 5 s
 export type Sample = {

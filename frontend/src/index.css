@@ -31,33 +31,7 @@
   --font-stencil: 'Saira Stencil One', 'Barlow Condensed', ui-sans-serif, sans-serif;
 
   /* Bridge for the legacy /debug page */
-  --color-slate-950: #e1efe0;
-  --color-slate-900: #fbfdfb;
-  --color-slate-800: #d5e5d3;
-  --color-slate-700: #bcd3b9;
-  --color-slate-600: #9fc4a6;
-  --color-slate-500: #6f8f78;
-  --color-slate-400: #4e6b58;
-  --color-slate-300: #3a5444;
-  --color-slate-200: #0f2a1a;
-  --color-slate-100: #0f2a1a;
-  --color-sky-300: #1d5a33;
-  --color-sky-400: #2e9b57;
-  --color-sky-500: #3fae63;
-  --color-sky-700: #3fae63;
-  --color-emerald-300: #1d6b3a;
-  --color-emerald-400: #2e9b57;
-  --color-emerald-500: #3fae63;
-  --color-emerald-700: #2e9b57;
-  --color-amber-300: #8a5a0a;
-  --color-amber-400: #d9962b;
-  --color-amber-500: #d9962b;
-  --color-amber-600: #c0841f;
-  --color-red-300: #9b2c1f;
-  --color-red-400: #d4492f;
-  --color-red-500: #d4492f;
-  --color-red-600: #b8402d;
-  --color-red-800: #e3a79c;
+
 }
 
 @layer base {

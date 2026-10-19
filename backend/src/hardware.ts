@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type {
-  Channel, Direction, FilteredEvent, LinkEvent, LinkState, MessageRecord, Mode, PacketRecord,
+  Channel, Direction, LinkEvent, LinkState, Mode,
   Reading, Settings, Severity, UnitId, UnitStatus,
 } from './types.js'
 
@@ -50,7 +50,7 @@ export function createHardware(getSettings: () => Settings) {
   const startTs = Date.now()
   let wasChannel: Channel | null = null
   let wasMode: Mode | null = null
-  const wasTamper: Record<UnitId, boolean> = { A: false, B: false }
+
   const batFlag: Record<UnitId, number> = { A: 0, B: 0 } // 0 ok, 1 low, 2 critical
   let failovers = 0
   let lastFailoverTs: number | null = null
@@ -150,7 +150,7 @@ export function createHardware(getSettings: () => Settings) {
 
     const rfVals = vals((r) => r.rfRssi)
     const encrypted = live.every((x) => x.r.encrypted === true)
-    const cipher = live.find((x) => x.r.cipher)?.r.cipher ?? 'None'
+    
     const berPre = avg(vals((r) => r.berPre))
     const berPost = avg(vals((r) => r.berPost))
 
@@ -180,17 +180,11 @@ export function createHardware(getSettings: () => Settings) {
       units: { A: unit(A), B: unit(B) },
       env: { temperatureC: avg(vals((r) => r.tempC)), humidityPct: avg(vals((r) => r.humidityPct)) },
       // no `aim`: real hardware cannot know the offset, so the frontend hides that panel
-      security: {
-        cipher, fsoEncrypted: encrypted, rfEncrypted: encrypted,
-        failedDecryptions: vals((r) => r.failedDecryptions).reduce((a, b) => a + b, 0),
-        framesAuthenticated: vals((r) => r.rxFrames).reduce((a, b) => a + b, 0),
-      },
+     
       session: { uptimeSec: Math.floor((ts - startTs) / 1000), failovers, lastFailoverTs, lastFailoverReason },
     }
-    return {
-      reading, events, scenario: 'clear',
-      packets: [] as PacketRecord[], messages: [] as MessageRecord[], filtered: [] as FilteredEvent[],
-    }
+     return { reading, events }
+    
   }
 
   return { step, ingest }

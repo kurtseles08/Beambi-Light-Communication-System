@@ -155,10 +155,10 @@ export default function Logs() {
     downloadCsv(`beambi-events-${stamp()}.csv`,
       ['time', 'severity', 'type', 'unit', 'duration_s', 'message'],
       matched.map((e: LinkEvent) => [new Date(e.ts).toISOString(), e.severity, e.type, e.unit ?? '', e.durationSec ?? '', e.message]))
-  const exportRuns = () =>
+    const exportRuns = () =>
     downloadCsv(`beambi-runs-${stamp()}.csv`,
-      ['started', 'ended', 'distance_m', 'notes', 'seconds', 'avg_rssi', 'min_rssi', 'max_rssi', 'avg_snr_db', 'delivery_pct', 'failovers', 'locked_pct'],
-      runs.map((r) => [new Date(r.startedAt).toISOString(), r.endedAt ? new Date(r.endedAt).toISOString() : '', r.distanceM, r.notes, r.samples, r.avgRssi.toFixed(1), r.minRssi.toFixed(1), r.maxRssi.toFixed(1), r.avgSnr.toFixed(1), r.pdr.toFixed(1), r.failovers, r.lockedPct.toFixed(0)]))
+      ['started', 'ended', 'distance_m', 'notes', 'seconds', 'avg_rssi', 'min_rssi', 'max_rssi', 'failovers', 'locked_pct'],
+      runs.map((r) => [new Date(r.startedAt).toISOString(), r.endedAt ? new Date(r.endedAt).toISOString() : '', r.distanceM, r.notes, r.samples, r.avgRssi.toFixed(1), r.minRssi.toFixed(1), r.maxRssi.toFixed(1), r.failovers, r.lockedPct.toFixed(0)]))
 
   const dlBtn = 'inline-flex items-center gap-1.5 rounded-lg border border-forest-900/15 bg-white px-3 py-1.5 text-sm font-medium transition-colors hover:bg-mint-200 disabled:opacity-40 disabled:hover:bg-white'
 

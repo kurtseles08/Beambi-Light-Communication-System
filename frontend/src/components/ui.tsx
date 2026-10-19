@@ -66,8 +66,6 @@ export function Bar({ pct, tone = 'ok' }: { pct: number; tone?: Tone }) {
 
 // Says where the numbers come from, so simulated values are never mistaken for measurements
 export function SourceTag() {
-  const source = useLink((s) => s.source)
-  if (source === 'simulator') return <Pill tone="warn">Simulated data</Pill>
-  if (source) return <Pill tone="ok">Measured data</Pill>
-  return <Pill>No data yet</Pill>
+  const latest = useLink((s) => s.latest)
+  return latest ? <Pill tone="ok">Measured data</Pill> : <Pill>No data yet</Pill>
 }

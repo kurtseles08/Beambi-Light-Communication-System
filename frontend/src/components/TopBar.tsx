@@ -45,7 +45,6 @@ export default function TopBar({ pinned, onTogglePin }: Props) {
   const quakes = useHazards((s) => s.quakes)
   const latest = useLink((s) => s.latest)
   const connected = useLink((s) => s.connected)
-  const source = useLink((s) => s.source)
 
   const hazard = assess(weather, quakes)
   const link = assessLink(latest, connected, nowMs)
@@ -53,8 +52,8 @@ export default function TopBar({ pinned, onTogglePin }: Props) {
   // Military date-time group, zone H = UTC+8
   const dtg = `${format(now, 'ddHHmm')}H ${format(now, 'MMM yy').toUpperCase()}`
 
-  const dataLevel: LampLevel = !connected ? 'crit' : source === 'simulator' ? 'warn' : 'ok'
-  const dataValue = !connected ? 'Disconnected' : source === 'simulator' ? 'Simulated' : 'Live'
+  const dataLevel: LampLevel = connected ? 'ok' : 'crit'
+  const dataValue = connected ? 'Live' : 'Disconnected'
 
   return (
     <header className="flex min-h-[72px] flex-wrap items-center justify-between gap-3 border-b border-forest-900/10 bg-mint-50/60 px-6 py-3">
