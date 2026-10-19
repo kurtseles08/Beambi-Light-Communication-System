@@ -1,9 +1,14 @@
-  {
-    "mode": "auto",
-    "failBelow": 30,
-    "lockAbove": 60,
-    "clearRssi": 75,
-    "lowBatteryPct": 20,
-    "critBatteryPct": 10,
-    "receiver": "solar-panel"
-  }
+{
+  "mode": "auto",
+  "failBelow": 42,
+  "lockAbove": 60,
+  "clearRssi": 75,
+  "lowBatteryPct": 20,
+  "critBatteryPct": 10,
+  "failDelaySec": 3,
+  "recoverHoldSec": 5,
+  "maxFrameLoss": 30,
+  "ambientWarnLux": 10000,
+  "ambientCritLux": 30000,
+  "receiver": "solar-panel"
+}
