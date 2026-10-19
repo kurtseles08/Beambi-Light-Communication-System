@@ -8,7 +8,7 @@ const MAX_READINGS = 120
 const MAX_EVENTS = 500
 
 // The two display zones live in the browser so a backend echo can never move the sliders back
-const ZONE_KEY = 'beambi.zones'
+const ZONE_KEY = 'beambi.zones.v2'
 type Zones = Pick<Settings, 'failBelow' | 'lockAbove'>
 
 function readZones(): Zones {

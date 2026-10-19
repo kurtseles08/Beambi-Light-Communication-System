@@ -139,7 +139,17 @@ export default function Home() {
         <Panel title="FSO signal strength" tone={zoneTone} index={4} className="lg:col-span-4"
           right={<Pill tone={zoneTone}>{zone === 'locked' ? 'Above lock' : zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
           <Gauge value={f.rssi} fail={settings.failBelow} lock={settings.lockAbove} />
-          <Sub>Derived from the receiver envelope and the link threshold.</Sub>
+          <Sub>Weakest of the two receivers, 0 to 100. 50 is the unit's failover point.</Sub>
+<div className="mt-3">
+  {(['A', 'B'] as const).map((u) => {
+    const x = latest.units[u]
+    return (
+      <Row key={u} label={`Unit ${u} receiver`}
+        value={x.online ? `${x.rssi.toFixed(1)} · laser ${x.laser ? 'up' : 'down'}` : 'Offline'}
+        tone={!x.online ? 'default' : x.laser ? 'ok' : 'warn'} />
+    )
+  })}
+</div>
         </Panel>
 
         <LoraSummary index={5} />

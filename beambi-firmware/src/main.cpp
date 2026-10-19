@@ -1,13 +1,15 @@
 /*
- * BeamBi unit: laser audio link + LoRa backup + Wi-Fi/serial JSON interface for the dashboard.
+ * BeamBi unit: laser audio link + LoRa backup + Wi-Fi JSON reporting for the dashboard.
  * PlatformIO project (src/main.cpp). Needs include/secrets.h and the libraries in platformio.ini.
- * Change UNIT_ID below to 'A' on one unit and 'B' on the other BEFORE uploading.
+ * Based on the working beambi_unit_lora.ino. Change UNIT_ID to 'A' or 'B' BEFORE uploading.
+ *
+ * Wiring: mic -> GPIO32 (ADC1, works with Wi-Fi), panel -> GPIO35, laser -> GPIO27, speaker DAC -> GPIO25,
+ *         LoRa: SCK 18, MISO 19, MOSI 23, NSS 5, RST 14, DIO0 26 (3.3 V only, antenna attached).
  *
  * Serial protocol (115200 baud, one message per line):
- *   OUT  {"t":"hello"...} {"t":"status"...} {"t":"event"...} {"t":"lora_msg"...} {"t":"pong"...} {"t":"cal"...}
- *   OUT  lines starting with '#' are human debug text (the backend ignores them)
- *   IN   {"cmd":"set","k":"vol","v":0.3}  {"cmd":"mode","v":0}  {"cmd":"cal"}  {"cmd":"ping"}  {"cmd":"msg","text":"hi"}
- *   IN   old single-key commands and >text still work from the serial monitor
+ *   OUT  {"t":"hello"|"status"|"event"|"lora_msg"|"pong"|"cal"...}   lines starting with '#' are debug text
+ *   IN   {"cmd":"set","k":"vol","v":0.3} {"cmd":"mode","v":0} {"cmd":"cal"} {"cmd":"ping"} {"cmd":"msg","text":"hi"}
+ *   IN   single-key commands and >text still work from the serial monitor (send h for help)
  */
 #include <Arduino.h>
 #include <math.h>
@@ -15,13 +17,13 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <ArduinoJson.h>
-
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include "secrets.h"
 
 #if ESP_ARDUINO_VERSION_MAJOR < 3
+  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"   // ADC_ATTEN_DB_11 is renamed in newer IDF
   #include <driver/adc.h>
   #include <driver/dac.h>
 #endif
@@ -41,15 +43,7 @@ constexpr int      LORA_SYNC  = 0xB1;
 constexpr uint32_t HB_MS = 2000, HB_FAILOVER_MS = 1000;
 constexpr uint32_t LINK_UP_MS = 500, LINK_DOWN_MS = 3000;
 
-constexpr char FW_VERSION[] = "0.3-wifi";
-
-constexpr float PILOT_HZ  = 1000.0f;   // must be bin-aligned: PILOT_HZ * GZ_N / FS_HZ = 25
-constexpr float PILOT_AMP = 0.12f;     // pilot depth in the TX signal (0..1)
-constexpr int   GZ_N      = 200;       // 25 ms block
-constexpr float GZ_COEFF  = 1.41421356f; // 2*cos(2*pi*25/200)
-static float pilotPhase = 0, gz1 = 0, gz2 = 0;
-static int   gzN = 0;
-static volatile float pilotEnvOut = 0;
+constexpr char FW_VERSION[] = "0.4-wifi";
 
 // ----------------------------------------------------------------- audio tunables
 constexpr int      FS_HZ          = 8000;
@@ -62,6 +56,19 @@ constexpr float DC_TRACK  = 0.001f;
 constexpr float GATE_OPEN = 0.020f, GATE_CLOSE = 0.010f;
 constexpr float DUCK_THRESHOLD = 0.05f, DUCK_GAIN = 0.25f;
 
+// ----------------------------------------------------------------- optional 1 kHz pilot (OFF = same behaviour as the working sketch)
+// OFF: "laser up" = received audio level above the threshold. The far unit must be sending sound (TX Tone, or speak on Mic).
+// ON : the far unit adds a quiet 1 kHz pilot to the mic signal and the link is detected from it, even in silence.
+//      Flash BOTH units with the same setting.
+constexpr bool  USE_PILOT = true;
+constexpr float PILOT_HZ  = 1000.0f;     // bin-aligned: PILOT_HZ * GZ_N / FS_HZ = 25
+constexpr float PILOT_AMP = 0.12f;
+constexpr int   GZ_N      = 200;         // 25 ms block
+constexpr float GZ_COEFF  = 1.41421356f; // 2*cos(2*pi*25/200)
+static float pilotPhase = 0, gz1 = 0, gz2 = 0;
+static int   gzN = 0;
+static volatile float pilotEnvOut = 0;
+
 // ----------------------------------------------------------------- runtime settings
 static volatile int   txSrc = 4;
 static volatile int   rxSink = 0;
@@ -70,7 +77,7 @@ static volatile float rxGain = 8.0f;
 static volatile float vol = 0.60f;
 static volatile bool  duckOn = false;
 static volatile bool  gateOn = false;
-static volatile float linkThresh = 0.10f;
+static volatile float linkThresh = 0.10f;   // calibrate from the dashboard (or key c)
 
 // ----------------------------------------------------------------- DSP helpers
 struct DcBlocker { float x1 = 0, y1 = 0;
@@ -94,18 +101,16 @@ static uint32_t tick = 0;
 
 static volatile float rxEnvOut = 0, rxPeak = 0;
 static volatile int   micMin = 4095, micMax = 0, panMin = 4095, panMax = 0;
-static volatile uint32_t panSum = 0, panCnt = 0;
 static volatile uint32_t overruns = 0, workMax = 0, workSum = 0, workCnt = 0;
-static volatile uint32_t tAdcSum = 0, tDacSum = 0;     // timing diagnostics (microseconds, summed per second)
 static const uint32_t MAXD = (1u << LASER_PWM_BITS) - 1;
 
 // ----------------------------------------------------------------- battery: 9V alkaline on PIN_BAT through 330k / 100k
 constexpr bool  HAVE_BATTERY = false;  // set true ONLY on a unit that has the divider wired to GPIO 34
 constexpr float BAT_DIV      = 4.3f;   // (330k + 100k) / 100k
-static volatile float batMv = 0;       // filtered millivolts at the pin, written by the sample task
+static volatile float batMv = 0;
 
 static float batVolts() { return (HAVE_BATTERY && batMv > 0) ? (batMv / 1000.0f) * BAT_DIV : -1.0f; }
-static int batPercent(float v) {       // 9V alkaline under load, rough
+static int batPercent(float v) {
   static const float V[] = {6.0f, 6.6f, 7.2f, 7.8f, 8.4f, 9.0f};
   static const int   P[] = {0, 10, 25, 50, 75, 100};
   if (v <= V[0]) return 0;
@@ -115,7 +120,7 @@ static int batPercent(float v) {       // 9V alkaline under load, rough
   return 100;
 }
 
-// ----------------------------------------------------------------- hardware access (fast paths on Arduino core 2.x)
+// ----------------------------------------------------------------- hardware access (fast ADC/DAC on Arduino core 2.x)
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   static inline void laserInit() { ledcAttach(PIN_LASER, LASER_PWM_HZ, LASER_PWM_BITS); }
   static inline void laserWrite(uint32_t d) { ledcWrite(PIN_LASER, d); }
@@ -127,7 +132,7 @@ static int batPercent(float v) {       // 9V alkaline under load, rough
 #else
   static inline void laserInit() { ledcSetup(0, LASER_PWM_HZ, LASER_PWM_BITS); ledcAttachPin(PIN_LASER, 0); }
   static inline void laserWrite(uint32_t d) { ledcWrite(0, d); }
-  // Direct driver calls skip the slow analogRead() wrapper. GPIO32 = ADC1_CH4, GPIO35 = ADC1_CH7, DAC1 = GPIO25.
+  // GPIO32 = ADC1_CH4, GPIO35 = ADC1_CH7, DAC1 = GPIO25. Direct driver calls are much faster than analogRead().
   static inline void adcInit() {
     analogReadResolution(12); analogSetAttenuation(ADC_11db);   // still used by analogReadMilliVolts (battery)
     adc1_config_width(ADC_WIDTH_BIT_12);
@@ -146,31 +151,33 @@ void IRAM_ATTR onSampleTimer() {
   if (woken) portYIELD_FROM_ISR();
 }
 
-// ----------------------------------------------------------------- 8 kHz sample task (core 0). NEVER print from here.
+// ----------------------------------------------------------------- 8 kHz sample task (core 1). NEVER print from here.
 static void sampleLoop(void *) {
   for (;;) {
     uint32_t n = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    if (n > 1) { overruns += n - 1; vTaskDelay(1); }   // yield so the idle task and Wi-Fi can run
+    if (n > 1) overruns += n - 1;                 // count missed ticks, then catch up
     int64_t t0 = esp_timer_get_time();
 
     int rawMic = adcMic();
     int rawPan = adcPanel();
-    int64_t t1 = esp_timer_get_time();
 
     if (rawMic < micMin) micMin = rawMic;
     if (rawMic > micMax) micMax = rawMic;
     if (rawPan < panMin) panMin = rawPan;
     if (rawPan > panMax) panMax = rawPan;
-    panSum += rawPan; panCnt++;
 
+    // RX: panel -> DC track -> HPF -> gain -> speaker
     rxDc += DC_TRACK * ((float)rawPan - rxDc);
     float y = rxHpf.process(((float)rawPan - rxDc) / 2048.0f);
-    float gs = y + GZ_COEFF * gz1 - gz2; gz2 = gz1; gz1 = gs;
-    if (++gzN >= GZ_N) {
-      float p = gz1*gz1 + gz2*gz2 - GZ_COEFF*gz1*gz2;
-      float amp = 2.0f * sqrtf(fmaxf(p, 0.0f)) / GZ_N;          // pilot amplitude, full-scale units
-      pilotEnvOut += 0.4f * (clampf(amp * rxGain, 0.0f, 1.0f) - pilotEnvOut);
-      gz1 = gz2 = 0; gzN = 0;
+
+    if (USE_PILOT) {                              // Goertzel at PILOT_HZ
+      float gs = y + GZ_COEFF * gz1 - gz2; gz2 = gz1; gz1 = gs;
+      if (++gzN >= GZ_N) {
+        float p = gz1*gz1 + gz2*gz2 - GZ_COEFF*gz1*gz2;
+        float amp = 2.0f * sqrtf(fmaxf(p, 0.0f)) / GZ_N;
+        pilotEnvOut += 0.4f * (clampf(amp * rxGain, 0.0f, 1.0f) - pilotEnvOut);
+        gz1 = gz2 = 0; gzN = 0;
+      }
     }
 
     float ra = clampf(y * rxGain, -1.0f, 1.0f);
@@ -185,10 +192,9 @@ static void sampleLoop(void *) {
                           if (spkPhase > 6.2831853f) spkPhase -= 6.2831853f; }
     else out = 0;
     out *= vol;
-    int64_t t2 = esp_timer_get_time();
     dacOut((uint8_t)(128.0f + 127.0f * out));
-    int64_t t3 = esp_timer_get_time();
 
+    // TX: mic -> gate -> duck -> gain -> laser PWM
     float m = micDc.process((float)rawMic / 2048.0f);
     micEnv += 0.01f * (fabsf(m) - micEnv);
     if (micEnv > GATE_OPEN) gateOpenState = true; else if (micEnv < GATE_CLOSE) gateOpenState = false;
@@ -200,8 +206,12 @@ static void sampleLoop(void *) {
     float duty = 0, t = 0;
     int src = txSrc;
     if (src == 4) {
-      pilotPhase += 2.0f*(float)M_PI*PILOT_HZ/FS_HZ; if (pilotPhase > 6.2831853f) pilotPhase -= 6.2831853f;
-      t = clampf(m * micGain * gateG * duckG + PILOT_AMP * sinf(pilotPhase), -1.0f, 1.0f);
+      t = m * micGain * gateG * duckG;
+      if (USE_PILOT) {
+        pilotPhase += 2.0f*(float)M_PI*PILOT_HZ/FS_HZ; if (pilotPhase > 6.2831853f) pilotPhase -= 6.2831853f;
+        t += PILOT_AMP * sinf(pilotPhase);
+      }
+      t = clampf(t, -1.0f, 1.0f);
       duty = TX_BIAS + TX_DEPTH * t;
     }
     else if (src == 3) { t = 0.8f * sinf(tonePhase); tonePhase += 2.0f*(float)M_PI*1000.0f/FS_HZ;
@@ -213,20 +223,18 @@ static void sampleLoop(void *) {
     laserWrite((uint32_t)(duty * (float)MAXD));
     tick++;
 
-    if (HAVE_BATTERY && (tick & 0x3FF) == 0) {   // about every 128 ms, ADC only used from this task
+    if (HAVE_BATTERY && (tick & 0x3FF) == 0) {    // about every 128 ms
       float mv = (float)analogReadMilliVolts(PIN_BAT);
       batMv = (batMv == 0) ? mv : batMv + 0.1f * (mv - batMv);
     }
 
     uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
     workSum += dt; workCnt++;
-    tAdcSum += (uint32_t)(t1 - t0);
-    tDacSum += (uint32_t)(t3 - t2);
     if (dt > workMax) workMax = dt;
   }
 }
 
-// ----------------------------------------------------------------- JSON output helpers (loop() / core 1 only)
+// ----------------------------------------------------------------- JSON output helper (loop() only)
 static void printJsonStr(const char *s) {
   Serial.print('"');
   for (; *s; s++) {
@@ -238,7 +246,7 @@ static void printJsonStr(const char *s) {
   Serial.print('"');
 }
 
-// ----------------------------------------------------------------- Wi-Fi reporting (own task, never touches the audio task)
+// ----------------------------------------------------------------- Wi-Fi reporting (own task on core 0, away from the audio task)
 struct NetMsg { char s[520]; };
 struct CmdMsg { char s[160]; };
 static QueueHandle_t netQ = nullptr, cmdQ = nullptr;
@@ -305,14 +313,14 @@ static void netTask(void *) {
   }
 }
 
-// ----------------------------------------------------------------- LoRa side
+// ----------------------------------------------------------------- LoRa side (runs in loop())
 static bool     loraOk = false;
 static uint32_t lastHbMs = 0, lastPeerMs = 0, txCount = 0, rxCount = 0;
 static int      lastRssi = 0; static float lastSnr = 0;
 static char     lastPeer = '-'; static bool peerLaserUp = false;
 static int      pathMode = 0;             // 0 AUTO, 1 force LASER, 2 force LORA
-static bool     laserLinkUp = false;
-static bool     failover = false;
+static bool     laserLinkUp = false;      // debounced laser link state
+static bool     failover = false;         // true when LoRa is the active path
 static uint32_t aboveSince = 0, belowSince = 0, calEndMs = 0, calCount = 0; static float calSum = 0;
 static bool     forceStatus = false;      // set after a command so the dashboard updates immediately
 
@@ -320,7 +328,7 @@ static void loraSend(char type, const char *payload) {
   if (!loraOk) return;
   LoRa.beginPacket();
   LoRa.print("BB:"); LoRa.print(UNIT_ID); LoRa.print(':'); LoRa.print(type); LoRa.print(':'); LoRa.print(payload);
-  LoRa.endPacket();
+  LoRa.endPacket();                       // blocks until sent (tens of ms)
   txCount++;
 }
 
@@ -335,7 +343,7 @@ static void netPushPong(char from, const char *seq) {
   char out[200]; serializeJson(d, out, sizeof out); netPush(out);
 }
 
-static void loraHandle(char *buf) {
+static void loraHandle(char *buf) {       // buf = "BB:<id>:<type>:<payload>"
   if (strncmp(buf, "BB:", 3) != 0 || strlen(buf) < 7 || buf[4] != ':' || buf[6] != ':') return;
   char from = buf[3], type = buf[5]; const char *payload = buf + 7;
   if (from == UNIT_ID) return;
@@ -343,8 +351,8 @@ static void loraHandle(char *buf) {
   if (type == 'H') peerLaserUp = (strncmp(payload, "up", 2) == 0);
   else if (type == 'M') {
     Serial.printf("{\"t\":\"lora_msg\",\"from\":\"%c\",\"rssi\":%d,\"snr\":%.1f,\"text\":", from, lastRssi, lastSnr);
-    netPushMsg(from, payload);
     printJsonStr(payload); Serial.println('}');
+    netPushMsg(from, payload);
   }
   else if (type == 'P') { char r[24]; snprintf(r, sizeof r, "%s", payload); loraSend('R', r); }
   else if (type == 'R') {
@@ -364,15 +372,17 @@ static void loraPoll() {
   loraHandle(buf);
 }
 
+static inline float linkEnv() { return USE_PILOT ? pilotEnvOut : rxEnvOut; }
+
 static void updatePath(uint32_t now) {
-  float env = pilotEnvOut;
-  if (calEndMs) {
+  float env = linkEnv();
+  if (calEndMs) {                                   // calibration window
     calSum += env; calCount++;
     if (now >= calEndMs) {
       calEndMs = 0;
       float mean = calCount ? calSum / (float)calCount : 0;
       linkThresh = fmaxf(mean * 2.0f, 0.02f);
-      prefs.putFloat("thr", (float)linkThresh);   // survive a reboot (battery swap, power loss)
+      prefs.putFloat("thr", (float)linkThresh);     // survives a reboot
       { JsonDocument d; char u[2] = {UNIT_ID, 0}; d["t"] = "cal"; d["unit"] = u; d["mean"] = mean; d["thr"] = (float)linkThresh;
         char o[120]; serializeJson(d, o, sizeof o); netPush(o); }
       Serial.printf("{\"t\":\"cal\",\"mean\":%.4f,\"thr\":%.4f}\n", mean, (float)linkThresh);
@@ -387,7 +397,7 @@ static void updatePath(uint32_t now) {
     failover = want;
     Serial.printf("{\"t\":\"event\",\"k\":\"path\",\"failover\":%d}\n", failover ? 1 : 0);
     Serial.printf("# PATH %s\n", failover ? "FAILOVER: LoRa active" : "laser active");
-    loraSend('H', failover ? "FO,0" : "up,0");
+    loraSend('H', failover ? "FO,0" : "up,0");     // tell the peer right away
     forceStatus = true;
   }
 }
@@ -402,7 +412,7 @@ static void emitStatus(uint32_t now) {
     "\"tx\":%d,\"rx\":%d,\"vol\":%.2f,\"rxGain\":%.2f,\"micGain\":%.2f,\"duck\":%d,\"gate\":%d,"
     "\"micP2P\":%d,\"panP2P\":%d,\"workAvg\":%u,\"workMax\":%u,\"over\":%u,\"cal\":%d,"
     "\"lora\":{\"ok\":%d,\"peer\":\"%c\",\"peerLaser\":%d,\"ageS\":%ld,\"rssi\":%d,\"snr\":%.1f,\"tx\":%u,\"rx\":%u},\"batV\":%.2f,\"batPct\":%d}",
-    UNIT_ID, (unsigned long)(now / 1000), laserLinkUp ? 1 : 0, (float)pilotEnvOut, (float)linkThresh, pathMode, failover ? 1 : 0,
+    UNIT_ID, (unsigned long)(now / 1000), laserLinkUp ? 1 : 0, (float)linkEnv(), (float)linkThresh, pathMode, failover ? 1 : 0,
     (int)txSrc, (int)rxSink, (float)vol, (float)rxGain, (float)micGain, duckOn ? 1 : 0, gateOn ? 1 : 0,
     (int)(micMax - micMin), (int)(panMax - panMin), wc ? (unsigned)(workSum / wc) : 0, (unsigned)workMax, (unsigned)overruns,
     calEndMs ? 1 : 0,
@@ -420,12 +430,12 @@ static uint32_t pingSeq = 0;
 static void help() {
   Serial.println(F("# TX src: 4 mic  3 tone  2 blink  1 steady  0 off | RX: p panel  k tone  x mute"));
   Serial.println(F("# +/- volume  ]/[ rx gain  G/g mic gain  d duck  n gate"));
-  Serial.println(F("# l path mode  c calibrate  b LoRa ping  >text send LoRa message"));
+  Serial.println(F("# l path mode (AUTO/LASER/LORA)  c calibrate  b LoRa ping  >text send LoRa message"));
   Serial.println(F("# JSON: {\"cmd\":\"set\",\"k\":\"vol\",\"v\":0.3} | {\"cmd\":\"mode\",\"v\":0} | {\"cmd\":\"cal\"} | {\"cmd\":\"ping\"} | {\"cmd\":\"msg\",\"text\":\"hi\"}"));
 }
 
 static void startCal() { calEndMs = millis() + 3000; calSum = 0; calCount = 0;
-  Serial.println(F("# CAL measuring noise for 3 s: cover the panel, laser off at the far end")); }
+  Serial.println(F("# CAL measuring noise for 3 s: cover the panel, far laser off")); }
 static void sendPing() { char p[16]; snprintf(p, sizeof p, "%lu", (unsigned long)++pingSeq); loraSend('P', p); Serial.println(F("# LORA ping sent")); }
 
 static void handleKey(char c) {
@@ -511,7 +521,12 @@ void setup() {
     Serial.println(F("# LoRa FAILED to start: check 3.3 V, SPI wires, NSS/RST/DIO0 pins and the band. Laser audio still runs."));
   }
 
-  xTaskCreatePinnedToCore(sampleLoop, "sample", 4096, nullptr, configMAX_PRIORITIES - 2, &sampleTask, 0);
+  netQ = xQueueCreate(8, sizeof(NetMsg));
+  cmdQ = xQueueCreate(6, sizeof(CmdMsg));
+
+  // Audio on core 1 (high priority), Wi-Fi/networking on core 0 so they never fight for the same core.
+  xTaskCreatePinnedToCore(sampleLoop, "sample", 4096, nullptr, configMAX_PRIORITIES - 2, &sampleTask, 1);
+  xTaskCreatePinnedToCore(netTask, "net", 10240, nullptr, 1, nullptr, 0);
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   sampleTimer = timerBegin(1000000);
   timerAttachInterrupt(sampleTimer, &onSampleTimer);
@@ -524,10 +539,6 @@ void setup() {
 #endif
   Serial.printf("{\"t\":\"hello\",\"unit\":\"%c\",\"fw\":\"%s\",\"loraOk\":%d}\n", UNIT_ID, FW_VERSION, loraOk ? 1 : 0);
   Serial.println(F("# BeamBi unit ready. Send h for commands."));
-
-  netQ = xQueueCreate(8, sizeof(NetMsg));
-  cmdQ = xQueueCreate(6, sizeof(CmdMsg));
-  xTaskCreatePinnedToCore(netTask, "net", 10240, nullptr, 1, nullptr, 1);
 }
 
 void loop() {
@@ -551,11 +562,8 @@ void loop() {
     forceStatus = false;
     emitStatus(now);
     if (sec) {
-      uint32_t wc = workCnt;
-      if (wc) Serial.printf("# TIMING us per sample: adc=%u dac=%u total=%u (budget 125) samples=%u\n",
-                            (unsigned)(tAdcSum / wc), (unsigned)(tDacSum / wc), (unsigned)(workSum / wc), (unsigned)wc);
-      micMin = 4095; micMax = 0; panMin = 4095; panMax = 0; panSum = 0; panCnt = 0;
-      rxPeak = 0; workSum = 0; workCnt = 0; workMax = 0; tAdcSum = 0; tDacSum = 0;
+      micMin = 4095; micMax = 0; panMin = 4095; panMax = 0;
+      rxPeak = 0; workSum = 0; workCnt = 0; workMax = 0;
     }
   }
   delay(5);

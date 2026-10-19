@@ -1,11 +1,10 @@
 import type { Settings } from '../types'
 
-// Mirrors backend/src/settings.ts. The backend sends the real values when the page connects.
-// failBelow and lockAbove are kept in the browser, so they always win over the backend.
+// Mirrors backend/src/settings.ts. On the dashboard scale 50 is the unit's real failover point.
 export const DEFAULT_SETTINGS: Settings = {
   mode: 'auto',
-  failBelow: 5,
-  lockAbove: 8,
+  failBelow: 50,
+  lockAbove: 60,
   clearRssi: 82,
   lowBatteryPct: 20,
   critBatteryPct: 10,

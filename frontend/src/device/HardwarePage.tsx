@@ -14,6 +14,7 @@ import type {
   UnitId,
 } from "../types";
 
+import { signalOf } from "../lib/signal";
 import VoicePanel from "./VoicePanel";
 
 type SetKey = Extract<DeviceCommand, { cmd: "set" }>["k"];
@@ -198,6 +199,7 @@ function UnitView({
       : "Searching";
   const stateTone: Tone = locked ? "ok" : d.failover ? "warn" : "default";
   const scale = Math.max(0.3, d.thr * 3, d.env * 1.2);
+  const sig = signalOf(d.env, d.thr);
   const pct = (v: number) => `${Math.min(100, (v / scale) * 100)}%`;
   const adcBad = (p2p: number) => p2p < 5 || p2p > 4000;
   const heard = d.lora.peer !== "-" && d.lora.ageS >= 0;
@@ -230,9 +232,9 @@ function UnitView({
             {stateText}
           </div>
           <Sub>
-            Receiver envelope {d.env.toFixed(3)} against the link threshold{" "}
-            {d.thr.toFixed(3)}
-          </Sub>
+  Receiver envelope {d.env.toFixed(3)} against the link threshold {d.thr.toFixed(3)}.
+  On the dashboard scale this is {sig.toFixed(1)} (50 = exactly at the threshold).
+</Sub>
           <div className="relative mt-4 h-4 rounded-full bg-forest-900/10">
             <div
               className="h-4 rounded-full bg-leaf-500 transition-[width] duration-300"
@@ -245,6 +247,7 @@ function UnitView({
             />
           </div>
           <div className="mt-4">
+            <Row label="Dashboard signal" value={sig.toFixed(1)} tone={sig >= 50 ? "ok" : "warn"} />
             <Row
               label="Laser link"
               value={d.laser ? "Up" : "Down"}

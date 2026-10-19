@@ -116,14 +116,15 @@ export default function Settings() {
 
       <div className="grid gap-5 lg:grid-cols-12">
         {/* Failover thresholds (read-only) */}
-        <Panel title="Signal zones" index={1} className="lg:col-span-6">
+        <Panel title="Signal zones" index={1} className="lg:col-span-6"
+  right={<button className={ghostBtn} onClick={() => update({ failBelow: 50, lockAbove: 60 })}><RotateCcw size={14} /> Match unit</button>}>
   <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
   <div className="mt-3">
     <Slider label="Failover below (RSSI)" value={s.failBelow} min={1} max={Math.max(1, s.lockAbove - 1)}
   hint="Colors the signal red below this. Set it to the reading where the unit really switches to LoRa."
   onChange={(v) => update({ failBelow: v })} />
 <Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={s.failBelow + 1} max={95}
-  hint="Counts as Locked at or above this. Used for colors, alignment advice and test runs."
+  hint="Counts as Locked at or above this. Keep it a little above the failover level (60 works well)."
   onChange={(v) => update({ lockAbove: v })} />
   </div>
   <Row label="Band between the zones" value={`${s.lockAbove - s.failBelow} pts`} />
@@ -169,7 +170,7 @@ export default function Settings() {
         <Panel title="Calibration" index={3} className="lg:col-span-6"
           right={<button className={ghostBtn} onClick={() => patchKeys(['clearRssi', 'receiver'])}><RotateCcw size={14} /> Defaults</button>}>
           <Slider label="Clear-air RSSI" value={s.clearRssi} min={40} max={100}
-            hint="The signal you get with the beam aligned on a clear day. Used to work out how much signal is lost."
+            hint="The unit switches to LoRa when the signal falls below 50 on this scale, so keep this at 50 unless you changed the threshold."
             onChange={(v) => update({ clearRssi: v })} />
           <div className="mb-2 flex flex-wrap items-center gap-3 rounded-xl bg-mint-50 p-3">
             <div className="text-sm">

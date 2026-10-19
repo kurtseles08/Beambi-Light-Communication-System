@@ -85,9 +85,8 @@ export function createHardware(getSettings: () => Settings) {
     // The firmware owns mode, channel and the laser flag. The dashboard only mirrors them.
     const devMode: Mode = live.find((x) => x.r.mode)?.r.mode ?? s.mode
     const channel: Channel = live.some((x) => x.r.channel === 'RF') ? 'RF' : 'FSO'
-    const anyLaser = live.some((x) => x.r.laserOk === true)
-    const state: LinkState = channel === 'RF' ? 'Failover' : anyLaser ? 'Locked' : 'Searching'
-
+    const allLaser = live.every((x) => x.r.laserOk === true)
+const state: LinkState = channel === 'RF' ? 'Failover' : allLaser ? 'Locked' : 'Searching'
     const events: LinkEvent[] = []
     const addEvent = (severity: Severity, type: string, message: string, extra: Partial<LinkEvent> = {}) =>
       events.push({ id: randomUUID(), ts, severity, type, message, ...extra })
@@ -142,11 +141,13 @@ export function createHardware(getSettings: () => Settings) {
       }
     }
     const unit = (x?: Stored): UnitStatus => ({
-      online: x !== undefined,
-      battery: num(x?.r.battery) ?? 0, // 0 means "not reported" until the firmware sends it
-      voltage: num(x?.r.voltage) ?? 0,
-      tamper: x?.r.tamper === true,
-    })
+  online: x !== undefined,
+  battery: num(x?.r.battery) ?? 0,
+  voltage: num(x?.r.voltage) ?? 0,
+  tamper: x?.r.tamper === true,
+  rssi: num(x?.r.rssi) ?? 0,
+  laser: x?.r.laserOk === true,
+})
 
     const rfVals = vals((r) => r.rfRssi)
     const encrypted = live.every((x) => x.r.encrypted === true)
@@ -162,8 +163,8 @@ export function createHardware(getSettings: () => Settings) {
       fso: {
         rssi, snr: avg(vals((r) => r.snr)), berPre, berPost,
         frameLoss: avg(vals((r) => r.lossPct)),
-        laserOk: anyLaser,
-        rxPresent: anyLaser,
+        laserOk: allLaser,
+rxPresent: allLaser,
         ambientLux: Math.max(0, ...vals((r) => r.lux)),
       },
       rf: {

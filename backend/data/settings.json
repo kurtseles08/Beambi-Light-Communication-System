@@ -1,7 +1,7 @@
 {
   "mode": "auto",
-  "failBelow": 5,
-  "lockAbove": 15,
+  "failBelow": 50,
+  "lockAbove": 60,
   "failDelaySec": 3,
   "recoverHoldSec": 5,
   "clearRssi": 82,

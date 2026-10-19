@@ -35,6 +35,8 @@ export type UnitStatus = {
   battery: number // %
   voltage: number
   tamper: boolean
+  rssi: number // this unit's own receiver, 0-100
+  laser: boolean // this unit's debounced laser flag
 }
 
 export type Reading = {
