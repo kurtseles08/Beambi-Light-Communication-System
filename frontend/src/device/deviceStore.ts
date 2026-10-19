@@ -84,3 +84,32 @@ export const setApplyBoth = (v: boolean) => set({ applyBoth: v });
 // target: "A", "B" or "both". Left out, the backend uses its shown unit.
 export const sendCommand = (c: DeviceCommand, target?: CommandTarget) =>
   socket.emit("device:command", c, target);
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ---------- voice (laptop mic -> backend -> unit) ----------
+// Audio is 16-bit mono PCM at 8 kHz, sent as 20 ms packets (160 samples).
+export const voiceStart = (unit: UnitId, sampleRate: number) =>
+  socket.emit("voice:start", { unit, sampleRate, codec: "pcm16" });
+export const voiceChunk = (unit: UnitId, pcm: ArrayBuffer) =>
+  socket.emit("voice:chunk", { unit, pcm });
+export const voiceEnd = (unit: UnitId) => socket.emit("voice:end", { unit });
+
+// Voice coming back from the hardware: { from, sampleRate, pcm, end }
+export type VoiceRx = { from: string; sampleRate?: number; pcm?: ArrayBuffer; end?: boolean };
+export const onVoiceRx = (cb: (m: VoiceRx) => void) => {
+  socket.on("voice:rx", cb);
+  return () => {
+    socket.off("voice:rx", cb);
+  };
+};

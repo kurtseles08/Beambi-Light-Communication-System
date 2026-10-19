@@ -93,7 +93,7 @@ export default function Environment() {
     <div className="space-y-6">
       <Header />
       <div className="grid gap-5 lg:grid-cols-12">
-        <Panel title="Detected condition" tone={tone} index={1} className="lg:col-span-4" right={<Pill>Estimate</Pill>}>
+        <Panel title="Detected condition" tone={tone} index={1} className="lg:col-span-6" right={<Pill>Estimate</Pill>}>
           <Big stencil size="md" tone={tone}>{label}</Big>
           <Sub>{note}</Sub>
           <div className="mt-3">
@@ -102,7 +102,7 @@ export default function Environment() {
           </div>
         </Panel>
 
-        <Panel title="Link margin" tone={marginTone} index={2} className="lg:col-span-4"
+        <Panel title="Link margin" tone={marginTone} index={2} className="lg:col-span-6"
           right={<Pill tone={marginTone}>{marginTone === 'ok' ? 'Healthy' : marginTone === 'warn' ? 'Shrinking' : 'Below failover'}</Pill>}>
           <Big mono tone={marginTone}>{signed(marginFail)}</Big>
           <Sub>Points of signal above the failover level before the link switches to LoRa.</Sub>
@@ -113,11 +113,6 @@ export default function Environment() {
           <Row label="Margin to lock" value={`${signed(marginLock)} pts`} tone={marginLock >= 0 ? 'ok' : 'warn'} />
         </Panel>
 
-        <Panel title="Sensors" index={3} className="lg:col-span-4">
-          <Row label="Temperature and humidity" value="Not installed" />
-          <Row label="Ambient light" value="Not installed" />
-          <Sub>Add a DHT22 or SHT31 for fog detection, and a BH1750 for ambient light. Each needs a few lines of firmware.</Sub>
-        </Panel>
 
         <Panel title="Attenuation trend" index={4} className="lg:col-span-12">
           <ResponsiveContainer width="100%" height={260}>

@@ -140,9 +140,9 @@ export default function Alignment() {
               <span className="text-sm text-moss-600">Lock threshold</span>
               <span className="font-mono text-2xl font-medium">{settings.lockAbove}</span>
             </div>
-            <input type="range" min={20} max={90} step={1} value={settings.lockAbove}
-              onChange={(e) => updateSettings({ lockAbove: Number(e.target.value) })}
-              aria-label="Lock threshold" className="mt-2 w-full accent-leaf-600" />
+            <input type="range" min={settings.failBelow + 1} max={95} step={1} value={settings.lockAbove}
+  onChange={(e) => updateSettings({ lockAbove: Number(e.target.value) })}
+  aria-label="Lock threshold" className="mt-2 w-full accent-leaf-600" />
           </label>
           <div className="mt-2">
             <Row label="Failover threshold" value={settings.failBelow} />

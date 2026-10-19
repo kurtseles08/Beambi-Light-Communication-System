@@ -119,12 +119,12 @@ export default function Settings() {
         <Panel title="Signal zones" index={1} className="lg:col-span-6">
   <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
   <div className="mt-3">
-    <Slider label="Failover below (RSSI)" value={s.failBelow} min={5} max={Math.min(80, s.lockAbove - 5)}
-      hint="Colors the signal red below this. Set it to the reading where the unit really switches to LoRa."
-      onChange={(v) => update({ failBelow: v })} />
-    <Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={Math.max(10, s.failBelow + 5)} max={95}
-      hint="Counts as Locked at or above this. Used for colors, alignment advice and test runs."
-      onChange={(v) => update({ lockAbove: v })} />
+    <Slider label="Failover below (RSSI)" value={s.failBelow} min={1} max={Math.max(1, s.lockAbove - 1)}
+  hint="Colors the signal red below this. Set it to the reading where the unit really switches to LoRa."
+  onChange={(v) => update({ failBelow: v })} />
+<Slider label="Lock at or above (RSSI)" value={s.lockAbove} min={s.failBelow + 1} max={95}
+  hint="Counts as Locked at or above this. Used for colors, alignment advice and test runs."
+  onChange={(v) => update({ lockAbove: v })} />
   </div>
   <Row label="Band between the zones" value={`${s.lockAbove - s.failBelow} pts`} />
   <p className="mt-2 text-[13px] leading-snug text-moss-600">

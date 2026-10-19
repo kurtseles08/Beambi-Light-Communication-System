@@ -10,10 +10,11 @@ import { Bar, Pill, Row, Sub, type Tone } from "../components/ui";
 import type {
   DeviceCommand,
   DeviceStatus,
-  LoraMessage,
   PongRecord,
   UnitId,
 } from "../types";
+
+import VoicePanel from "./VoicePanel";
 
 type SetKey = Extract<DeviceCommand, { cmd: "set" }>["k"];
 const btn =
@@ -156,7 +157,6 @@ function UnitView({
   online,
   applyBoth,
   dis,
-  loraLog,
   pongs,
 }: {
   d: DeviceStatus;
@@ -164,10 +164,8 @@ function UnitView({
   online: Record<UnitId, boolean>;
   applyBoth: boolean;
   dis: boolean;
-  loraLog: LoraMessage[];
   pongs: PongRecord[];
 }) {
-  const [text, setText] = useState("");
   const other: UnitId = selected === "A" ? "B" : "A";
 
   // Shared settings go to both units when the switch is on. Calibrate, ping and
@@ -421,47 +419,14 @@ function UnitView({
                 : "No pong yet"}
             </span>
           </div>
-          <div className="mt-3 flex gap-2">
-            <input
-              value={text}
-              maxLength={40}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={`Message from Unit ${selected} (max 40 characters)`}
-              className="flex-1 rounded-lg border border-forest-900/15 bg-white px-2.5 py-1.5 text-sm"
-            />
-            <button
-              disabled={dis || !text.trim()}
-              className={btn}
-              onClick={() => {
-                sendUnit({ cmd: "msg", text });
-                setText("");
-              }}
-            >
-              Send
-            </button>
-          </div>
-          <p className="mt-3 text-xs text-moss-600">
-            Messages received by either unit appear in this list.
-          </p>
-          <ul className="mt-1 max-h-40 space-y-1 overflow-auto text-sm">
-            {loraLog.length === 0 && (
-              <li className="text-moss-600">No messages received yet.</li>
-            )}
-            {[...loraLog].reverse().map((m) => (
-              <li key={m.id}>
-                <span className="font-mono text-moss-600">
-                  {new Date(m.ts).toLocaleTimeString()} {m.from}:
-                </span>{" "}
-                {m.text}
-              </li>
-            ))}
-          </ul>
         </Panel>
+        
+        <VoicePanel unit={selected} disabled={dis} index={4} className="lg:col-span-6" />
 
         <Panel
           title={`Device health (Unit ${selected})`}
-          index={4}
-          className="lg:col-span-6"
+          index={5}
+          className="lg:col-span-12"
         >
           {haveBat && (
             <Row
@@ -503,7 +468,7 @@ function UnitView({
             />
           </div>
           <Sub>
-            The sample budget is 125 µs at 8 kHz. A peak-to-peak near 0 or 4095
+            The saPanelbudget is 125 µs at 8 kHz. A peak-to-peak near 0 or 4095
             means a stuck or saturated ADC input.
           </Sub>
         </Panel>
@@ -520,7 +485,6 @@ export default function HardwarePage() {
     selected,
     applyBoth,
     canCommand,
-    loraLog,
     pongs,
     lastError,
   } = useDevice();
@@ -591,7 +555,6 @@ export default function HardwarePage() {
           online={unitsOnline}
           applyBoth={applyBoth}
           dis={!canCommand}
-          loraLog={loraLog}
           pongs={pongs}
         />
       )}
