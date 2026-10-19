@@ -5,7 +5,7 @@
   "failDelaySec": 3,
   "recoverHoldSec": 5,
   "clearRssi": 82,
-  "lowBatteryPct": 20,
+  "lowBatteryPct": 27,
   "critBatteryPct": 10,
   "receiver": "solar-panel"
 }
