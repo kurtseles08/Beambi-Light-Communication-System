@@ -41,8 +41,7 @@ const devices: Record<UnitId, DeviceStatus | null> = { A: null, B: null }
 const lastSeen: Record<UnitId, number> = { A: 0, B: 0 }
 const unitsOnline: Record<UnitId, boolean> = { A: false, B: false }
 const wifiQueue: Record<UnitId, DeviceCommand[]> = { A: [], B: [] }
-let lastShownPost = 0
-let bridge: DeviceBridge | null = null
+const serialUnits: Partial<Record<UnitId, DeviceBridge>> = {}
 
 // Voice messages and packet logs are not reported by the firmware yet.
 // They stay empty so the dashboard's init payload keeps its shape.
@@ -100,16 +99,12 @@ app.post('/api/device', (req, res) => {
   if (!b || typeof b.t !== 'string') { res.status(400).json({ error: 'need t' }); return }
   const unit: UnitId | null = b.unit === 'A' || b.unit === 'B' ? b.unit : null
   if (b.t === 'status' && !unit) { res.status(400).json({ error: 'need unit A or B' }); return }
-  onDeviceLine(b, true)
-  if (unit === SHOWN_UNIT) {
-    lastShownPost = Date.now()
-    setDeviceConnected(true)
-  }
+  onDeviceLine(b)
   res.json({ ok: true, cmds: unit ? wifiQueue[unit].splice(0) : [] })
 })
 
 // ---------------------------------------------------------------- device messages (USB or Wi-Fi)
-function onDeviceLine(o: Record<string, unknown>, wifi = false) {
+function onDeviceLine(o: Record<string, unknown>) {
   switch (o.t) {
     case 'status': {
       const s = o as unknown as DeviceStatus
@@ -117,8 +112,9 @@ function onDeviceLine(o: Record<string, unknown>, wifi = false) {
       devices[s.unit] = { ...s, ts: Date.now() }
       lastSeen[s.unit] = Date.now()
       io.emit('devices', devices)
-      // Over USB there is one board, so show it. Over Wi-Fi both report and /hardware shows SHOWN_UNIT.
-      if (!wifi || s.unit === SHOWN_UNIT) {
+      // The summary always follows SHOWN_UNIT, regardless of transport.
+      if (s.unit === SHOWN_UNIT) {
+        setDeviceConnected(true)
         device = { ...s, ts: Date.now() }
         io.emit('device', device)
       }
@@ -170,17 +166,36 @@ function onDeviceLine(o: Record<string, unknown>, wifi = false) {
 }
 
 // ---------------------------------------------------------------- USB serial (optional)
-// With SERIAL_PATH set, one board is read over USB. Without it, units report over Wi-Fi.
-const serialPath = process.env.SERIAL_PATH
-if (serialPath) {
-  bridge = createSerialBridge({
-    path: serialPath,
+// SERIAL_PATH remains supported for a single board; SERIAL_PATHS accepts comma-separated ports.
+const serialPaths = [...new Set((process.env.SERIAL_PATHS || process.env.SERIAL_PATH || '')
+  .split(',').map((path) => path.trim()).filter(Boolean))]
+for (const path of serialPaths) {
+  let reportedUnit: UnitId | null = null
+  const bridge = createSerialBridge({
+    path,
     baudRate: Number(process.env.SERIAL_BAUD) || 115200,
-    onLine: (o) => onDeviceLine(o),
-    onConnection: setDeviceConnected,
+    onLine: (o) => {
+      if (o.t === 'status' && typeof o.env === 'number' && (o.unit === 'A' || o.unit === 'B')) {
+        if (reportedUnit && reportedUnit !== o.unit && serialUnits[reportedUnit] === bridge) {
+          delete serialUnits[reportedUnit]
+        }
+        if (serialUnits[o.unit] && serialUnits[o.unit] !== bridge) {
+          console.warn(`[serial] Duplicate UNIT_ID ${o.unit} reported on ${path}; check firmware IDs`)
+        }
+        reportedUnit = o.unit
+        serialUnits[o.unit] = bridge
+      }
+      onDeviceLine(o)
+    },
+    onConnection: (connected) => {
+      if (!connected && reportedUnit && serialUnits[reportedUnit] === bridge) {
+        delete serialUnits[reportedUnit]
+      }
+    },
   })
-} else if (!DEVICE_KEY) {
-  console.warn('Neither SERIAL_PATH nor DEVICE_KEY is set: no hardware can connect')
+}
+if (!serialPaths.length && !DEVICE_KEY) {
+  console.warn('Neither SERIAL_PATHS, SERIAL_PATH nor DEVICE_KEY is set: no hardware can connect')
 }
 
 // ---------------------------------------------------------------- command validation
@@ -214,10 +229,8 @@ function validateCommand(c: unknown): DeviceCommand | null {
 
 // ---------------------------------------------------------------- offline detection
 setInterval(() => {
-  // Wi-Fi: no report from the shown unit for 5 s means it is offline
-  if (!bridge && deviceConnected && Date.now() - lastShownPost > STALE_MS) {
-    wifiQueue.A.length = 0
-    wifiQueue.B.length = 0
+  // Summary availability follows fresh telemetry from SHOWN_UNIT on either transport.
+  if (deviceConnected && Date.now() - lastSeen[SHOWN_UNIT] >= STALE_MS) {
     setDeviceConnected(false)
   }
 
@@ -255,19 +268,21 @@ io.on('connection', (socket) => {
     const cmd = validateCommand(raw)
     if (!cmd) { socket.emit('device:ack', { ok: false, error: 'invalid command' }); return }
 
-    if (bridge) {
-      const sent = bridge.send(cmd) // one USB board
-      socket.emit('device:ack', { ok: sent, error: sent ? undefined : 'device not connected' })
-      return
-    }
-    // Wi-Fi: the page can name the target ('A', 'B' or 'both'). Each unit picks commands up with its next report.
     const targets: UnitId[] = target === 'both' ? ['A', 'B'] : target === 'B' ? ['B'] : target === 'A' ? ['A'] : [SHOWN_UNIT]
+    let ok = false
     for (const u of targets) {
-      const q = wifiQueue[u]
-      if (q.length >= 20) q.shift()
-      q.push(cmd)
+      if (Date.now() - lastSeen[u] >= STALE_MS) continue
+      const bridge = serialUnits[u]
+      if (bridge?.isOpen()) {
+        ok = bridge.send(cmd) || ok
+      } else {
+        // Wi-Fi units pick up queued commands with their next report.
+        const q = wifiQueue[u]
+        if (q.length >= 20) q.shift()
+        q.push(cmd)
+        ok = true
+      }
     }
-    const ok = targets.some((u) => unitsOnline[u])
     socket.emit('device:ack', { ok, error: ok ? undefined : 'unit not connected' })
   })
 

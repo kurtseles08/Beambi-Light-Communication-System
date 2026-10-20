@@ -22,20 +22,31 @@
  * New keys: l cycle path mode (AUTO / LASER / LORA)   c calibrate link threshold (3 s)
  *           b LoRa ping   >text  send a LoRa message
  *
- * STATUS: not run on hardware. Set UNIT_ID to a different letter on each unit.
+ * Restored pre-Wi-Fi audio configuration: mic GPIO13/ADC2, panel GPIO35/ADC1.
+ * Select PlatformIO unit_a or unit_b for the unit ID. No Wi-Fi is started.
  */
 #include <Arduino.h>
 #include <math.h>
 #include <string.h>
 #include <SPI.h>
 #include <LoRa.h>
+#include <ArduinoJson.h>
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+#include <driver/adc.h>
+#include <driver/dac.h>
+#endif
 
 // ----------------------------------------------------------------- pins
-constexpr int PIN_MIC = 13, PIN_PANEL = 35, PIN_LASER = 27, PIN_DAC = 25, PIN_LED = 2;
+constexpr int PIN_MIC = 13;
+constexpr int PIN_PANEL = 35, PIN_LASER = 27, PIN_DAC = 25, PIN_LED = 2;
 constexpr int LORA_SS = 5, LORA_RST = 14, LORA_DIO0 = 26;   // SCK 18, MISO 19, MOSI 23 are the default SPI pins
 
 // ----------------------------------------------------------------- LoRa settings (must match on every node)
-constexpr char     UNIT_ID    = 'A';        // A on one unit, B on the other
+#ifndef BEAMBI_UNIT_NUMBER
+#define BEAMBI_UNIT_NUMBER 0
+#endif
+static_assert(BEAMBI_UNIT_NUMBER == 0 || BEAMBI_UNIT_NUMBER == 1, "Select unit_a or unit_b");
+constexpr char UNIT_ID = BEAMBI_UNIT_NUMBER == 0 ? 'A' : 'B';
 constexpr long     LORA_FREQ  = 433E6;      // SET TO YOUR MODULE'S BAND (433E6, 868E6, 915E6) AND LOCAL RULES
 constexpr int      LORA_SF    = 7;          // 7 = fastest, 12 = longest range
 constexpr long     LORA_BW    = 125E3;
@@ -53,13 +64,15 @@ constexpr float TX_BIAS  = 0.50f;
 constexpr float TX_DEPTH = 0.40f;
 constexpr float RX_HPF_HZ = 250.0f;
 constexpr float DC_TRACK  = 0.001f;
+constexpr float ENV_TRACK = 0.002f;
+constexpr float MIC_TRACK = 0.01f;
 constexpr float GATE_OPEN = 0.020f, GATE_CLOSE = 0.010f;
 constexpr float DUCK_THRESHOLD = 0.05f, DUCK_GAIN = 0.25f;
 
 // ----------------------------------------------------------------- runtime settings
 static volatile int   txSrc = 4;
 static volatile int   rxSink = 0;
-static volatile float micGain = 4.0f;
+static volatile float micGain = 1.0f;
 static volatile float rxGain = 8.0f;
 static volatile float vol = 0.60f;
 static volatile bool  duckOn = false;
@@ -73,14 +86,17 @@ struct Biquad { float b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0;
   float process(float x) { float y=b0*x+z1; z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return y; }
   void highpass(float fs, float fc, float q=0.7071f) {
     float w0=2.0f*(float)M_PI*fc/fs, cs=cosf(w0), al=sinf(w0)/(2.0f*q), a0=1.0f+al;
-    b0=((1.0f+cs)*0.5f)/a0; b1=-(1.0f+cs)/a0; b2=b0; a1=(-2.0f*cs)/a0; a2=(1.0f-al)/a0; } };
+    b0=((1.0f+cs)*0.5f)/a0; b1=-(1.0f+cs)/a0; b2=b0; a1=(-2.0f*cs)/a0; a2=(1.0f-al)/a0; }
+  void lowpass(float fs, float fc, float q=0.7071f) {
+    float w0=2.0f*(float)M_PI*fc/fs, cs=cosf(w0), al=sinf(w0)/(2.0f*q), a0=1.0f+al;
+    b0=((1.0f-cs)*0.5f)/a0; b1=(1.0f-cs)/a0; b2=b0; a1=(-2.0f*cs)/a0; a2=(1.0f-al)/a0; } };
 static inline float clampf(float v, float lo, float hi) { return v<lo?lo:(v>hi?hi:v); }
 
 // ----------------------------------------------------------------- state
 static TaskHandle_t sampleTask = nullptr;
 static hw_timer_t  *sampleTimer = nullptr;
 static DcBlocker micDc;
-static Biquad    rxHpf;
+static Biquad    rxHpf, rxLpf, micHpf, micLpf;
 static float rxDc = 1875.0f, rxEnv = 0, micEnv = 0, gateG = 1, duckG = 1;
 static bool  gateOpenState = false;
 static float tonePhase = 0, spkPhase = 0;
@@ -90,6 +106,8 @@ static volatile float rxEnvOut = 0, rxPeak = 0;
 static volatile int   micMin = 4095, micMax = 0, panMin = 4095, panMax = 0;
 static volatile uint32_t panSum = 0, panCnt = 0;
 static volatile uint32_t overruns = 0, workMax = 0, workSum = 0, workCnt = 0;
+static volatile uint32_t adcErrors = 0;
+static volatile uint32_t micRailSamples = 0, micSamples = 0, txClipSamples = 0;
 static const uint32_t MAXD = (1u << LASER_PWM_BITS) - 1;
 
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -108,14 +126,27 @@ void IRAM_ATTR onSampleTimer() {
 
 // ----------------------------------------------------------------- 8 kHz sample task (core 0)
 static void sampleLoop(void *) {
+  TickType_t lastRecovery = xTaskGetTickCount();
   for (;;) {
     uint32_t n = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    if (n > 1) { overruns += n - 1; vTaskDelay(1); }   // safety: lets the idle task run
+    if (n > 1) overruns += n - 1;
     int64_t t0 = esp_timer_get_time();
 
-    int rawMic = analogRead(PIN_MIC);
-    int rawPan = analogRead(PIN_PANEL);
+    int rawMic, rawPan;
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+    // One read per input, using separate converters. Configure only in setup.
+    if (adc2_get_raw(ADC2_CHANNEL_4, ADC_WIDTH_BIT_12, &rawMic) != ESP_OK) {
+      rawMic = 0;
+      adcErrors++;
+    }
+    rawPan = adc1_get_raw(ADC1_CHANNEL_7);
+#else
+    rawMic = analogRead(PIN_MIC);
+    rawPan = analogRead(PIN_PANEL);
+#endif
 
+    micSamples++;
+    if (rawMic <= 8 || rawMic >= 4087) micRailSamples++;
     if (rawMic < micMin) micMin = rawMic;
     if (rawMic > micMax) micMax = rawMic;
     if (rawPan < panMin) panMin = rawPan;
@@ -124,9 +155,9 @@ static void sampleLoop(void *) {
 
     // RX: panel -> DC track -> HPF -> gain -> speaker
     rxDc += DC_TRACK * ((float)rawPan - rxDc);
-    float y = rxHpf.process(((float)rawPan - rxDc) / 2048.0f);
+    float y = rxLpf.process(rxHpf.process(((float)rawPan - rxDc) / 2048.0f));
     float ra = clampf(y * rxGain, -1.0f, 1.0f);
-    rxEnv += 0.002f * (fabsf(ra) - rxEnv);
+    rxEnv += ENV_TRACK * (fabsf(ra) - rxEnv);
     rxEnvOut = rxEnv;
     if (fabsf(y) > rxPeak) rxPeak = fabsf(y);
 
@@ -137,20 +168,29 @@ static void sampleLoop(void *) {
                           if (spkPhase > 6.2831853f) spkPhase -= 6.2831853f; }
     else out = 0;
     out *= vol;
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+    // DAC1 is enabled once in setup, rather than on every write.
+    dac_output_voltage(DAC_CHANNEL_1, (uint8_t)(128.0f + 127.0f * out));
+#else
     dacWrite(PIN_DAC, (uint8_t)(128.0f + 127.0f * out));
+#endif
 
     // TX: mic -> gate -> duck -> gain -> laser PWM
-    float m = micDc.process((float)rawMic / 2048.0f);
-    micEnv += 0.01f * (fabsf(m) - micEnv);
+    float m = micLpf.process(micHpf.process(micDc.process((float)rawMic / 2048.0f)));
+    micEnv += MIC_TRACK * (fabsf(m) - micEnv);
     if (micEnv > GATE_OPEN) gateOpenState = true; else if (micEnv < GATE_CLOSE) gateOpenState = false;
     float gTarget = (!gateOn || gateOpenState) ? 1.0f : 0.0f;
-    gateG += 0.01f * (gTarget - gateG);
+    gateG += MIC_TRACK * (gTarget - gateG);
     float dTarget = (duckOn && rxEnv > DUCK_THRESHOLD) ? DUCK_GAIN : 1.0f;
-    duckG += 0.002f * (dTarget - duckG);
+    duckG += ENV_TRACK * (dTarget - duckG);
 
     float duty = 0, t = 0;
     int src = txSrc;
-    if (src == 4) { t = clampf(m * micGain * gateG * duckG, -1.0f, 1.0f); duty = TX_BIAS + TX_DEPTH * t; }
+    if (src == 4) {
+      float driven = m * micGain * gateG * duckG;
+      if (fabsf(driven) >= 1.0f) txClipSamples++;
+      t = clampf(driven, -1.0f, 1.0f); duty = TX_BIAS + TX_DEPTH * t;
+    }
     else if (src == 3) { t = 0.8f * sinf(tonePhase); tonePhase += 2.0f*(float)M_PI*1000.0f/FS_HZ;
                          if (tonePhase > 6.2831853f) tonePhase -= 6.2831853f; duty = TX_BIAS + TX_DEPTH * t; }
     else if (src == 2) { duty = (((tick / (FS_HZ / 4)) & 1) ? TX_BIAS + TX_DEPTH : TX_BIAS - TX_DEPTH); }
@@ -163,11 +203,20 @@ static void sampleLoop(void *) {
     uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
     workSum += dt; workCnt++;
     if (dt > workMax) workMax = dt;
+    // Persistent overload must not starve IDLE0. This is recovery, not normal pacing.
+    // Retain the missed ticks in the notification count for overrun accounting.
+    TickType_t nowTick = xTaskGetTickCount();
+    if (n > 1 && nowTick - lastRecovery >= pdMS_TO_TICKS(100)) {
+      vTaskDelay(1);
+      lastRecovery = xTaskGetTickCount();
+    }
   }
 }
 
 // ----------------------------------------------------------------- LoRa side (runs in loop(), core 1)
 static bool     loraOk = false;
+static bool     loraEnabled = true; // Restored pre-Wi-Fi behavior; z can pause LoRa.
+static bool     statusLogsEnabled = true; // Restored USB dashboard reports; q can pause them.
 static uint32_t loraSeq = 0, lastHbMs = 0, lastPeerMs = 0, txCount = 0, rxCount = 0;
 static int      lastRssi = 0; static float lastSnr = 0;
 static char     lastPeer = '-'; static bool peerLaserUp = false;
@@ -177,7 +226,7 @@ static bool     failover = false;         // true when the backup channel is the
 static uint32_t aboveSince = 0, belowSince = 0, calEndMs = 0, calCount = 0; static float calSum = 0;
 
 static void loraSend(char type, const char *payload) {
-  if (!loraOk) return;
+  if (!loraOk || !loraEnabled) return;
   LoRa.beginPacket();
   LoRa.print("BB:"); LoRa.print(UNIT_ID); LoRa.print(':'); LoRa.print(type); LoRa.print(':'); LoRa.print(payload);
   LoRa.endPacket();                       // blocks until sent (tens of ms)
@@ -196,7 +245,7 @@ static void loraHandle(char *buf) {       // buf = "BB:<id>:<type>:<payload>"
 }
 
 static void loraPoll() {
-  if (!loraOk) return;
+  if (!loraOk || !loraEnabled) return;
   int sz = LoRa.parsePacket();
   if (sz <= 0) return;
   char buf[80]; int n = 0;
@@ -231,7 +280,51 @@ static void updatePath(uint32_t now) {
 
 // ----------------------------------------------------------------- serial input
 static char lineBuf[48]; static int lineLen = 0; static bool lineMode = false;
+static char jsonBuf[256];
+static size_t jsonLen = 0;
+static bool jsonMode = false, jsonOverflow = false;
+
+// Backend protocol stays on loop/core 1; the audio task never prints JSON.
+static void emitStatus(uint32_t now, bool oneShot = false) {
+  if (!statusLogsEnabled && !oneShot) return;
+  JsonDocument d;
+  char unit[2] = {UNIT_ID, 0}, peer[2] = {lastPeer, 0};
+  d["t"] = "status"; d["unit"] = unit; d["up"] = now / 1000;
+  d["fs"] = FS_HZ;
+  d["laser"] = laserLinkUp ? 1 : 0; d["env"] = (float)rxEnvOut;
+  d["thr"] = (float)linkThresh; d["mode"] = pathMode;
+  d["failover"] = failover ? 1 : 0;
+  d["tx"] = (int)txSrc; d["rx"] = (int)rxSink;
+  d["vol"] = (float)vol; d["rxGain"] = (float)rxGain;
+  d["micGain"] = (float)micGain;
+  d["duck"] = duckOn ? 1 : 0; d["gate"] = gateOn ? 1 : 0;
+  d["micP2P"] = (int)(micMax - micMin);
+  d["panP2P"] = (int)(panMax - panMin);
+  d["micMin"] = (int)micMin; d["micMax"] = (int)micMax;
+  d["panMin"] = (int)panMin; d["panMax"] = (int)panMax;
+  d["adcErrors"] = (uint32_t)adcErrors;
+  // Cumulative counts: compare their increases between status reports.
+  d["micSamples"] = (uint32_t)micSamples;
+  d["micRailSamples"] = (uint32_t)micRailSamples;
+  d["txClipSamples"] = (uint32_t)txClipSamples;
+  uint32_t wc = workCnt;
+  d["workAvg"] = wc ? workSum / wc : 0;
+  d["workMax"] = (uint32_t)workMax; d["over"] = (uint32_t)overruns;
+  d["cal"] = calEndMs ? 1 : 0;
+  // This firmware has no battery measurement.
+  d["batV"] = -1; d["batPct"] = -1;
+  JsonObject l = d["lora"].to<JsonObject>();
+  l["ok"] = loraOk ? 1 : 0; l["enabled"] = loraEnabled ? 1 : 0; l["peer"] = peer;
+  l["peerLaser"] = peerLaserUp ? 1 : 0;
+  l["ageS"] = lastPeerMs ? (long)((now - lastPeerMs) / 1000) : -1L;
+  l["rssi"] = lastRssi; l["snr"] = lastSnr;
+  l["tx"] = txCount; l["rx"] = rxCount;
+  if (statusLogsEnabled || oneShot) { serializeJson(d, Serial); Serial.println(); }
+
+}
 static void help() {
+  Serial.println(F("s one status report | q periodic USB logs on/off (ON at boot)"));
+  Serial.println(F("z radio on/off (diagnostic: stops LoRa TX/RX while off)"));
   Serial.println(F("TX src: 4 mic  3 tone  2 blink  1 steady  0 off | RX: p panel  k tone  x mute"));
   Serial.println(F("+/- volume  ]/[ rx gain  G/g mic gain  d duck  n gate"));
   Serial.println(F("l path mode (AUTO/LASER/LORA)  c calibrate link threshold  b LoRa ping  >text send LoRa message"));
@@ -253,15 +346,60 @@ static void handleKey(char c) {
   else if (c == 'l') { pathMode = (pathMode + 1) % 3; Serial.printf("[PATH MODE] %s\n", pathMode == 0 ? "AUTO" : pathMode == 1 ? "force LASER" : "force LORA"); }
   else if (c == 'c') { calEndMs = millis() + 3000; calSum = 0; calCount = 0; Serial.println(F("[CAL] measuring noise for 3 s: cover the panel, laser off at the far end")); }
   else if (c == 'b') { char p[16]; snprintf(p, sizeof p, "%lu", (unsigned long)++pingSeq); loraSend('P', p); Serial.println(F("[LORA] ping sent")); }
+  else if (c == 'z') {
+    if (!loraOk) { Serial.println(F("[RADIO] unavailable: LoRa initialization failed")); return; }
+    loraEnabled = !loraEnabled;
+    if (loraEnabled) { LoRa.idle(); lastHbMs = millis(); }
+    else LoRa.sleep();
+    Serial.println(loraEnabled ? F("[RADIO] ON") : F("[RADIO] OFF: LoRa TX/RX stopped; laser audio continues"));
+  }
+  else if (c == 'q') {
+    statusLogsEnabled = !statusLogsEnabled;
+    Serial.println(statusLogsEnabled ? F("[LOGS] periodic USB status ON") : F("[LOGS] periodic USB status OFF; USB dashboard reports paused"));
+  }
+  else if (c == 's') emitStatus(millis(), true);
   else if (c == 'h') help();
 }
+static void handleJson(const char *line) {
+  JsonDocument d;
+  if (deserializeJson(d, line)) return;
+  const char *cmd = d["cmd"] | "";
+  if (!strcmp(cmd, "set")) {
+    const char *k = d["k"] | "";
+    if (!d["v"].is<float>()) return;
+    float v = d["v"].as<float>();
+    if (!isfinite(v)) return;
+    if (!strcmp(k, "txSrc")) txSrc = (int)clampf(v, 0, 4);
+    else if (!strcmp(k, "rxSink")) rxSink = (int)clampf(v, 0, 2);
+    else if (!strcmp(k, "vol")) vol = clampf(v, 0.05f, 1);
+    else if (!strcmp(k, "rxGain")) rxGain = clampf(v, 1, 60);
+    else if (!strcmp(k, "micGain")) micGain = clampf(v, 0.5f, 30);
+    else if (!strcmp(k, "duck")) duckOn = v > 0;
+    else if (!strcmp(k, "gate")) gateOn = v > 0;
+  } else if (!strcmp(cmd, "mode")) pathMode = constrain((int)(d["v"] | 0), 0, 2);
+  else if (!strcmp(cmd, "cal")) handleKey('c');
+  else if (!strcmp(cmd, "ping")) handleKey('b');
+  else if (!strcmp(cmd, "msg")) {
+    const char *text = d["text"] | "";
+    if (*text) loraSend('M', text);
+  }
+}
+
 static void serialPoll() {
   while (Serial.available()) {
     char c = (char)Serial.read();
-    if (lineMode) {
+    if (jsonMode) {
+      if (c == '\n' || c == '\r') {
+        jsonBuf[jsonLen] = 0;
+        if (!jsonOverflow) handleJson(jsonBuf);
+        jsonMode = false; jsonLen = 0; jsonOverflow = false;
+      } else if (jsonLen < sizeof(jsonBuf) - 1) jsonBuf[jsonLen++] = c;
+      else jsonOverflow = true; // Discard remainder; never interpret it as keys.
+    } else if (lineMode) {
       if (c == '\n' || c == '\r') { lineBuf[lineLen] = 0; if (lineLen) { loraSend('M', lineBuf); Serial.printf("[LORA] sent: %s\n", lineBuf); } lineMode = false; lineLen = 0; }
       else if (lineLen < (int)sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
-    } else if (c == '>') { lineMode = true; lineLen = 0; }
+    } else if (c == '{') { jsonMode = true; jsonLen = 1; jsonBuf[0] = c; }
+    else if (c == '>') { lineMode = true; lineLen = 0; }
     else handleKey(c);
   }
 }
@@ -273,10 +411,20 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_12); // GPIO35 panel
+  adc2_config_channel_atten(ADC2_CHANNEL_4, ADC_ATTEN_DB_12); // GPIO13 microphone
+  adc_power_acquire(); // Keep the ADC powered during continuous audio sampling.
+  dac_output_enable(DAC_CHANNEL_1);
+#endif
   laserInit();
   laserWrite((uint32_t)(TX_BIAS * (float)MAXD));
   dacWrite(PIN_DAC, 128);
   rxHpf.highpass((float)FS_HZ, RX_HPF_HZ);
+  rxLpf.lowpass((float)FS_HZ, 3000.0f);
+  micHpf.highpass((float)FS_HZ, 250.0f);
+  micLpf.lowpass((float)FS_HZ, 3000.0f);
 
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
   loraOk = LoRa.begin(LORA_FREQ);
@@ -284,6 +432,10 @@ void setup() {
     LoRa.setSpreadingFactor(LORA_SF); LoRa.setSignalBandwidth(LORA_BW); LoRa.setCodingRate4(LORA_CR);
     LoRa.setSyncWord(LORA_SYNC); LoRa.enableCrc(); LoRa.setTxPower(LORA_POWER);
     Serial.printf("LoRa OK: %.1f MHz SF%d BW%.0fkHz unit %c\n", LORA_FREQ / 1e6, LORA_SF, LORA_BW / 1e3, UNIT_ID);
+    if (!loraEnabled) {
+      LoRa.sleep();
+      Serial.println(F("[RADIO] OFF at boot for audio recovery; z enables LoRa"));
+    }
   } else {
     Serial.println(F("LoRa FAILED to start: check 3.3 V, SPI wires, NSS/RST/DIO0 pins and the band. Laser audio still runs."));
   }
@@ -300,6 +452,9 @@ void setup() {
   timerAlarmEnable(sampleTimer);
 #endif
   Serial.println(F("BeamBi unit + LoRa backup. Send h for commands."));
+  Serial.println(F("[LOGS] periodic USB output ON; s=one report, q=toggle periodic reports"));
+  Serial.printf("[WIRING] unit %c: microphone OUT GPIO13; panel GPIO35; sample rate %d Hz\n", UNIT_ID, FS_HZ);
+  Serial.println(F("Wi-Fi is not included in this GPIO13 rollback build."));
 }
 
 void loop() {
@@ -309,7 +464,7 @@ void loop() {
   loraPoll();
   updatePath(now);
 
-  if (loraOk && now - lastHbMs >= (failover ? HB_FAILOVER_MS : HB_MS)) {
+  if (loraOk && loraEnabled && now - lastHbMs >= (failover ? HB_FAILOVER_MS : HB_MS)) {
     lastHbMs = now;
     char p[24]; snprintf(p, sizeof p, "%s,%u", failover ? "FO" : (laserLinkUp ? "up" : "down"), (unsigned)(rxEnvOut * 1000));
     loraSend('H', p);
@@ -318,18 +473,7 @@ void loop() {
 
   if (now - last >= 1000) {
     last = now;
-    static const char *SRC[] = {"OFF", "STEADY", "BLINK", "TONE", "MIC"};
-    static const char *SNK[] = {"PANEL", "TONE", "MUTE"};
-    uint32_t pc = panCnt, wc = workCnt;
-    Serial.printf("[TX %s mic p2p=%d g=%.1f] [RX %s panel p2p=%d env=%.3f thr=%.3f laser=%s gain=%.1f vol=%.2f] work=%u/%u us over=%u",
-      SRC[txSrc], micMax - micMin, (float)micGain, SNK[rxSink], panMax - panMin,
-      (float)rxEnvOut, (float)linkThresh, laserLinkUp ? "UP" : "down", (float)rxGain, (float)vol,
-      wc ? (unsigned)(workSum / wc) : 0, (unsigned)workMax, (unsigned)overruns);
-    if (loraOk) Serial.printf(" | LORA %s peer=%c %s %lus ago rssi=%d tx=%u rx=%u",
-      failover ? "ACTIVE" : "standby", lastPeer, peerLaserUp ? "laser-up" : "laser-down",
-      lastPeerMs ? (unsigned long)((now - lastPeerMs) / 1000) : 0UL, lastRssi, (unsigned)txCount, (unsigned)rxCount);
-    Serial.println();
-    (void)pc;
+    emitStatus(now);
     micMin = 4095; micMax = 0; panMin = 4095; panMax = 0; panSum = 0; panCnt = 0;
     rxPeak = 0; workSum = 0; workCnt = 0; workMax = 0;
   }
