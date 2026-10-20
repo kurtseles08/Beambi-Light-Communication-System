@@ -56,3 +56,18 @@ From `beambi-firmware`, use your board's actual COM port to upload:
 
 Only select the command for the board being uploaded. Close its serial monitor
 first. The commands select each unit's ID automatically.
+
+## Saving microphone gain for battery operation
+
+`G`/`g` adjust microphone gain in RAM. Send uppercase `S` to save the current
+gain on that ESP32; wait for `[GAIN] saved ...` before removing power. It is
+loaded at boot on USB or battery power. Lowercase `s` only prints status; the
+`savedMicGain` field is -1 until a valid setting has been saved. The default
+remains 1 for an unconfigured board. TX/RX mode, volume, LoRa and log toggles
+still reset to their normal defaults on reboot. Flash writing can briefly
+interrupt audio while S is being processed; it is not done periodically.
+
+Choose the lowest gain that gives intelligible speech. ADC rail readings and
+increasing txClipSamples indicate clipping; gain 30 should not be treated as
+a calibrated default. Saving gain cannot correct microphone ADC overvoltage or
+a buck supply fault. Verify buck output is 5.0 V with the actual load connected.

@@ -2,6 +2,15 @@
 
 ## Current firmware update (2026-10-20)
 
+Battery-gain fix added after rollback: G/g gain adjustments were RAM-only and
+reset to 1 after switching power. Uppercase S now explicitly saves microphone
+gain to Preferences/NVS and loads it before audio sampling starts. Lowercase s
+remains one-shot status. savedMicGain=-1 means no valid stored setting. Writes
+only occur on S (may briefly interrupt audio), not in the sampling loop.
+Only microphone gain is persisted; modes, volume, radio/log toggles still reset.
+The reported gain 30 produced substantial ADC/transmit clipping and is not a
+verified suitable default. Battery supply and actual audio need bench validation.
+
 The user explicitly requested rollback to the earlier GPIO13 audio setup.
 Active src/main.cpp now uses microphone GPIO13/ADC2 channel 4 and panel
 GPIO35/ADC1 channel 7. Every PlatformIO target uses these pins. The team must

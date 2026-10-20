@@ -1,0 +1,608 @@
+/*
+ * beambi_unit_lora.ino -- BeamBi unit: laser audio link + LoRa backup channel (ESP32 DevKit)
+ * One file. Needs the "LoRa" library by Sandeep Mistry (Library Manager).
+ *
+ * Wiring: same as before, plus the LoRa module (SX1276/SX1278, 3.3 V ONLY):
+ *   LoRa 3.3V -> ESP32 3V3   (+100uF and 0.1uF across the module's 3.3V and GND)
+ *   LoRa GND  -> GND
+ *   LoRa SCK  -> GPIO18      LoRa MISO -> GPIO19      LoRa MOSI -> GPIO23
+ *   LoRa NSS  -> GPIO5       LoRa RST  -> GPIO14      LoRa DIO0 -> GPIO26
+ *   Antenna attached BEFORE power. Never transmit without it.
+ *
+ * What this version adds (stage 1 of the backup channel):
+ *   - LoRa heartbeat every 2 s (1 s in failover) carrying the unit's laser-link state
+ *   - text messages over LoRa: type a line starting with > (example  >hello)
+ *   - ping with RSSI/SNR: key b
+ *   - failover state machine: laser link up/down detection, AUTO / force laser / force LoRa
+ *   NOT included: voice over LoRa. That needs a low-rate vocoder (for example Codec2);
+ *   raw audio does not fit in a LoRa channel.
+ *
+ * Laser audio keys (as before): 4 mic  3 tone  2 blink  1 steady  0 off | p panel  k tone  x mute
+ *   + - volume   ] [ rx gain   G g mic gain   d duck   n gate   h help
+ * New keys: l cycle path mode (AUTO / LASER / LORA)   c calibrate link threshold (3 s)
+ *           b LoRa ping   >text  send a LoRa message
+ *
+ * ALL builds use microphone GPIO32 and panel GPIO35. No profile changes wiring.
+ * unit_a_audio/unit_b_audio disable radios for testing; unit_a/unit_b enable Wi-Fi.
+ * Wi-Fi settings live in include/secrets.h; network work stays outside the sample task.
+ */
+#include <Arduino.h>
+#include <math.h>
+#include <string.h>
+#include <SPI.h>
+#include <LoRa.h>
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <freertos/queue.h>
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#include "secrets.example.h"
+#endif
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+#include <driver/adc.h>
+#include <driver/dac.h>
+#endif
+
+// ----------------------------------------------------------------- pins
+#ifndef BEAMBI_WIFI_ENABLED
+#define BEAMBI_WIFI_ENABLED 0
+#endif
+#ifndef BEAMBI_LORA_ENABLED
+#define BEAMBI_LORA_ENABLED 1
+#endif
+constexpr int PIN_MIC = 32;
+constexpr int PIN_PANEL = 35, PIN_LASER = 27, PIN_DAC = 25, PIN_LED = 2;
+constexpr int LORA_SS = 5, LORA_RST = 14, LORA_DIO0 = 26;   // SCK 18, MISO 19, MOSI 23 are the default SPI pins
+
+// ----------------------------------------------------------------- LoRa settings (must match on every node)
+#ifndef BEAMBI_UNIT_NUMBER
+#define BEAMBI_UNIT_NUMBER 0
+#endif
+static_assert(BEAMBI_UNIT_NUMBER == 0 || BEAMBI_UNIT_NUMBER == 1, "Select unit_a or unit_b");
+constexpr char UNIT_ID = BEAMBI_UNIT_NUMBER == 0 ? 'A' : 'B';
+constexpr long     LORA_FREQ  = 433E6;      // SET TO YOUR MODULE'S BAND (433E6, 868E6, 915E6) AND LOCAL RULES
+constexpr int      LORA_SF    = 7;          // 7 = fastest, 12 = longest range
+constexpr long     LORA_BW    = 125E3;
+constexpr int      LORA_CR    = 5;          // 4/5
+constexpr int      LORA_POWER = 14;         // dBm
+constexpr int      LORA_SYNC  = 0xB1;
+constexpr uint32_t HB_MS = 2000, HB_FAILOVER_MS = 1000;
+constexpr uint32_t LINK_UP_MS = 500, LINK_DOWN_MS = 3000;
+
+// ----------------------------------------------------------------- audio tunables
+// Four ADC conversions (two settling reads) need more than the old 125 us budget.
+// 4 kHz gives 250 us while retaining speech below the new 1.6 kHz low-pass cutoff.
+constexpr int      FS_HZ          = 4000;
+constexpr uint32_t LASER_PWM_HZ   = 80000;
+constexpr int      LASER_PWM_BITS = 9;
+constexpr float TX_BIAS  = 0.50f;
+constexpr float TX_DEPTH = 0.40f;
+constexpr float RX_HPF_HZ = 250.0f;
+constexpr float DC_TRACK  = 0.001999f; // Same time constant as 0.001 at 8 kHz.
+constexpr float ENV_TRACK = 0.003996f; // Same time constant as 0.002 at 8 kHz.
+constexpr float MIC_TRACK = 0.0199f;   // Same time constant as 0.01 at 8 kHz.
+constexpr float GATE_OPEN = 0.020f, GATE_CLOSE = 0.010f;
+constexpr float DUCK_THRESHOLD = 0.05f, DUCK_GAIN = 0.25f;
+
+// ----------------------------------------------------------------- runtime settings
+static volatile int   txSrc = 4;
+static volatile int   rxSink = 0;
+static volatile float micGain = 1.0f;
+static volatile float rxGain = 8.0f;
+static volatile float vol = 0.60f;
+static volatile bool  duckOn = false;
+static volatile bool  gateOn = false;
+static volatile bool micSamplingEnabled = true; // j isolates ADC channel switching without rewiring.
+static volatile float linkThresh = 0.10f;   // use key c to calibrate
+
+// ----------------------------------------------------------------- DSP helpers
+struct DcBlocker { float x1 = 0, y1 = 0;
+  float process(float x) { float y = x - x1 + 0.990025f * y1; x1 = x; y1 = y; return y; } };
+struct Biquad { float b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0;
+  float process(float x) { float y=b0*x+z1; z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return y; }
+  void highpass(float fs, float fc, float q=0.7071f) {
+    float w0=2.0f*(float)M_PI*fc/fs, cs=cosf(w0), al=sinf(w0)/(2.0f*q), a0=1.0f+al;
+    b0=((1.0f+cs)*0.5f)/a0; b1=-(1.0f+cs)/a0; b2=b0; a1=(-2.0f*cs)/a0; a2=(1.0f-al)/a0; }
+  void lowpass(float fs, float fc, float q=0.7071f) {
+    float w0=2.0f*(float)M_PI*fc/fs, cs=cosf(w0), al=sinf(w0)/(2.0f*q), a0=1.0f+al;
+    b0=((1.0f-cs)*0.5f)/a0; b1=(1.0f-cs)/a0; b2=b0; a1=(-2.0f*cs)/a0; a2=(1.0f-al)/a0; } };
+static inline float clampf(float v, float lo, float hi) { return v<lo?lo:(v>hi?hi:v); }
+
+// ----------------------------------------------------------------- state
+static TaskHandle_t sampleTask = nullptr;
+static hw_timer_t  *sampleTimer = nullptr;
+static DcBlocker micDc;
+static Biquad    rxHpf, rxLpf, micHpf, micLpf;
+static float rxDc = 1875.0f, rxEnv = 0, micEnv = 0, gateG = 1, duckG = 1;
+static bool  gateOpenState = false;
+static float tonePhase = 0, spkPhase = 0;
+static uint32_t tick = 0;
+
+static volatile float rxEnvOut = 0, rxPeak = 0;
+static volatile int   micMin = 4095, micMax = 0, panMin = 4095, panMax = 0;
+static volatile uint32_t panSum = 0, panCnt = 0;
+static volatile uint32_t overruns = 0, workMax = 0, workSum = 0, workCnt = 0;
+static volatile uint32_t adcErrors = 0;
+static volatile uint32_t micRailSamples = 0, micSamples = 0, txClipSamples = 0;
+static const uint32_t MAXD = (1u << LASER_PWM_BITS) - 1;
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  static inline void laserInit() { ledcAttach(PIN_LASER, LASER_PWM_HZ, LASER_PWM_BITS); }
+  static inline void laserWrite(uint32_t d) { ledcWrite(PIN_LASER, d); }
+#else
+  static inline void laserInit() { ledcSetup(0, LASER_PWM_HZ, LASER_PWM_BITS); ledcAttachPin(PIN_LASER, 0); }
+  static inline void laserWrite(uint32_t d) { ledcWrite(0, d); }
+#endif
+
+void IRAM_ATTR onSampleTimer() {
+  BaseType_t woken = pdFALSE;
+  vTaskNotifyGiveFromISR(sampleTask, &woken);
+  if (woken) portYIELD_FROM_ISR();
+}
+
+// ----------------------------------------------------------------- 4 kHz sample task (core 0)
+static void sampleLoop(void *) {
+  TickType_t lastRecovery = xTaskGetTickCount();
+  for (;;) {
+    uint32_t n = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (n > 1) overruns += n - 1;
+    int64_t t0 = esp_timer_get_time();
+
+    int rawMic = 2048, rawPan;
+    bool readMic = micSamplingEnabled;
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+    // Read the panel before the mic, and discard the first conversion after
+    // each channel switch. This targets sample/hold carryover on shared ADC1.
+    (void)adc1_get_raw(ADC1_CHANNEL_7);
+    rawPan = adc1_get_raw(ADC1_CHANNEL_7);
+    if (readMic) {
+      (void)adc1_get_raw(ADC1_CHANNEL_4);
+      rawMic = adc1_get_raw(ADC1_CHANNEL_4);
+      if (rawMic < 0) { rawMic = 2048; adcErrors++; }
+    }
+#else
+    (void)analogRead(PIN_PANEL);
+    rawPan = analogRead(PIN_PANEL);
+    if (readMic) { (void)analogRead(PIN_MIC); rawMic = analogRead(PIN_MIC); }
+#endif
+
+    if (readMic) {
+      micSamples++;
+      if (rawMic <= 8 || rawMic >= 4087) micRailSamples++;
+      if (rawMic < micMin) micMin = rawMic;
+      if (rawMic > micMax) micMax = rawMic;
+    }
+    if (rawPan < panMin) panMin = rawPan;
+    if (rawPan > panMax) panMax = rawPan;
+    panSum += rawPan; panCnt++;
+
+    // RX: panel -> DC track -> HPF -> gain -> speaker
+    rxDc += DC_TRACK * ((float)rawPan - rxDc);
+    float y = rxLpf.process(rxHpf.process(((float)rawPan - rxDc) / 2048.0f));
+    float ra = clampf(y * rxGain, -1.0f, 1.0f);
+    rxEnv += ENV_TRACK * (fabsf(ra) - rxEnv);
+    rxEnvOut = rxEnv;
+    if (fabsf(y) > rxPeak) rxPeak = fabsf(y);
+
+    float out;
+    int sink = rxSink;
+    if (sink == 0) out = ra;
+    else if (sink == 1) { out = 0.5f * sinf(spkPhase); spkPhase += 2.0f*(float)M_PI*1000.0f/FS_HZ;
+                          if (spkPhase > 6.2831853f) spkPhase -= 6.2831853f; }
+    else out = 0;
+    out *= vol;
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+    // DAC1 is enabled once in setup, rather than on every write.
+    dac_output_voltage(DAC_CHANNEL_1, (uint8_t)(128.0f + 127.0f * out));
+#else
+    dacWrite(PIN_DAC, (uint8_t)(128.0f + 127.0f * out));
+#endif
+
+    // TX: mic -> gate -> duck -> gain -> laser PWM
+    float m = micLpf.process(micHpf.process(micDc.process((float)rawMic / 2048.0f)));
+    micEnv += MIC_TRACK * (fabsf(m) - micEnv);
+    if (micEnv > GATE_OPEN) gateOpenState = true; else if (micEnv < GATE_CLOSE) gateOpenState = false;
+    float gTarget = (!gateOn || gateOpenState) ? 1.0f : 0.0f;
+    gateG += MIC_TRACK * (gTarget - gateG);
+    float dTarget = (duckOn && rxEnv > DUCK_THRESHOLD) ? DUCK_GAIN : 1.0f;
+    duckG += ENV_TRACK * (dTarget - duckG);
+
+    float duty = 0, t = 0;
+    int src = txSrc;
+    if (src == 4 && readMic) {
+      float driven = m * micGain * gateG * duckG;
+      if (fabsf(driven) >= 1.0f) txClipSamples++;
+      t = clampf(driven, -1.0f, 1.0f); duty = TX_BIAS + TX_DEPTH * t;
+    } else if (src == 4) duty = TX_BIAS; // No audio modulation when mic sampling is disabled.
+    else if (src == 3) { t = 0.8f * sinf(tonePhase); tonePhase += 2.0f*(float)M_PI*1000.0f/FS_HZ;
+                         if (tonePhase > 6.2831853f) tonePhase -= 6.2831853f; duty = TX_BIAS + TX_DEPTH * t; }
+    else if (src == 2) { duty = (((tick / (FS_HZ / 4)) & 1) ? TX_BIAS + TX_DEPTH : TX_BIAS - TX_DEPTH); }
+    else if (src == 1) duty = TX_BIAS;
+    else duty = 0;
+    duty = clampf(duty, 0.0f, 1.0f);
+    laserWrite((uint32_t)(duty * (float)MAXD));
+    tick++;
+
+    uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
+    workSum += dt; workCnt++;
+    if (dt > workMax) workMax = dt;
+    // Persistent overload must not starve IDLE0. This is recovery, not normal pacing.
+    // Retain the missed ticks in the notification count for overrun accounting.
+    TickType_t nowTick = xTaskGetTickCount();
+    if (n > 1 && nowTick - lastRecovery >= pdMS_TO_TICKS(100)) {
+      vTaskDelay(1);
+      lastRecovery = xTaskGetTickCount();
+    }
+  }
+}
+
+// ----------------------------------------------------------------- LoRa side (runs in loop(), core 1)
+static bool     loraOk = false;
+static bool     loraEnabled = BEAMBI_LORA_ENABLED; // z toggles LoRa; recovery boots with it off.
+static bool     statusLogsEnabled = false; // Quiet at boot; q enables periodic USB diagnostics.
+struct StatusPacket { char json[1536]; };
+struct RemoteCommand { char json[256]; };
+static QueueHandle_t networkReports = nullptr, networkCommands = nullptr;
+static volatile int networkHttpCode = 0;
+static volatile uint32_t networkCommandDrops = 0;
+static volatile bool wifiRuntimeEnabled = BEAMBI_WIFI_ENABLED;
+static bool wifiConfigured() { return BEAMBI_WIFI_ENABLED && WIFI_SSID[0] && SERVER_HOST[0] && DEVICE_KEY[0]; }
+
+// Network I/O never runs inside the audio task or the LoRa/serial command loop.
+static void networkLoop(void *) {
+  bool radioStarted = false;
+  uint32_t lastRetry = millis();
+  StatusPacket packet;
+  for (;;) {
+    if (!wifiRuntimeEnabled) {
+      if (radioStarted) { WiFi.mode(WIFI_OFF); radioStarted = false; }
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    if (!radioStarted) {
+      WiFi.mode(WIFI_STA);
+      WiFi.setAutoReconnect(true);
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.setSleep(false); // Avoid modem power-save wake cycles during audio.
+      radioStarted = true;
+      lastRetry = millis();
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+      if (millis() - lastRetry >= 15000) { WiFi.reconnect(); lastRetry = millis(); }
+      vTaskDelay(pdMS_TO_TICKS(200));
+      continue;
+    }
+    if (xQueueReceive(networkReports, &packet, pdMS_TO_TICKS(200)) != pdTRUE) continue;
+    WiFiClient client;
+    HTTPClient http;
+    String url = String("http://") + SERVER_HOST + ":" + String(SERVER_PORT) + "/api/device";
+    if (!http.begin(client, url)) { networkHttpCode = -1; continue; }
+    http.setConnectTimeout(700);
+    http.setTimeout(700);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("x-api-key", DEVICE_KEY);
+    int code = http.POST((uint8_t *)packet.json, strlen(packet.json));
+    networkHttpCode = code;
+    if (code == 200 && http.getSize() >= 0 && http.getSize() <= 8192) {
+      JsonDocument response;
+      if (!deserializeJson(response, http.getString())) {
+        for (JsonObjectConst command : response["cmds"].as<JsonArrayConst>()) {
+          RemoteCommand item;
+          if (measureJson(command) >= sizeof(item.json)) { networkCommandDrops++; continue; }
+          serializeJson(command, item.json, sizeof(item.json));
+          if (xQueueSend(networkCommands, &item, 0) != pdTRUE) networkCommandDrops++;
+        }
+      }
+    }
+    http.end();
+  }
+}
+static uint32_t loraSeq = 0, lastHbMs = 0, lastPeerMs = 0, txCount = 0, rxCount = 0;
+static int      lastRssi = 0; static float lastSnr = 0;
+static char     lastPeer = '-'; static bool peerLaserUp = false;
+static int      pathMode = 0;             // 0 AUTO, 1 force LASER, 2 force LORA
+static bool     laserLinkUp = false;      // debounced laser link state
+static bool     failover = false;         // true when the backup channel is the active path
+static uint32_t aboveSince = 0, belowSince = 0, calEndMs = 0, calCount = 0; static float calSum = 0;
+
+static void loraSend(char type, const char *payload) {
+  if (!loraOk || !loraEnabled) return;
+  LoRa.beginPacket();
+  LoRa.print("BB:"); LoRa.print(UNIT_ID); LoRa.print(':'); LoRa.print(type); LoRa.print(':'); LoRa.print(payload);
+  LoRa.endPacket();                       // blocks until sent (tens of ms)
+  txCount++;
+}
+
+static void loraHandle(char *buf) {       // buf = "BB:<id>:<type>:<payload>"
+  if (strncmp(buf, "BB:", 3) != 0 || strlen(buf) < 7 || buf[4] != ':' || buf[6] != ':') return;
+  char from = buf[3], type = buf[5]; const char *payload = buf + 7;
+  if (from == UNIT_ID) return;
+  lastPeer = from; lastPeerMs = millis(); rxCount++;
+  if (type == 'H') peerLaserUp = (strncmp(payload, "up", 2) == 0);
+  else if (type == 'M') Serial.printf("[LORA MSG from %c rssi=%d snr=%.1f] %s\n", from, lastRssi, lastSnr, payload);
+  else if (type == 'P') { char r[24]; snprintf(r, sizeof r, "%s", payload); loraSend('R', r); }
+  else if (type == 'R') Serial.printf("[LORA PONG from %c seq=%s rssi=%d snr=%.1f]\n", from, payload, lastRssi, lastSnr);
+}
+
+static void loraPoll() {
+  if (!loraOk || !loraEnabled) return;
+  int sz = LoRa.parsePacket();
+  if (sz <= 0) return;
+  char buf[80]; int n = 0;
+  while (LoRa.available() && n < (int)sizeof(buf) - 1) buf[n++] = (char)LoRa.read();
+  buf[n] = 0;
+  lastRssi = LoRa.packetRssi(); lastSnr = LoRa.packetSnr();
+  loraHandle(buf);
+}
+
+static void updatePath(uint32_t now) {
+  // debounced laser-link detection from the receiver envelope
+  float env = rxEnvOut;
+  if (calEndMs) {                                   // calibration window
+    calSum += env; calCount++;
+    if (now >= calEndMs) {
+      calEndMs = 0;
+      float mean = calCount ? calSum / (float)calCount : 0;
+      linkThresh = fmaxf(mean * 2.0f, 0.02f);
+      Serial.printf("[CAL] noise mean=%.3f -> link threshold=%.3f\n", mean, (float)linkThresh);
+    }
+    return;
+  }
+  if (env > linkThresh) { belowSince = 0; if (!aboveSince) aboveSince = now; if (now - aboveSince >= LINK_UP_MS) laserLinkUp = true; }
+  else                  { aboveSince = 0; if (!belowSince) belowSince = now; if (now - belowSince >= LINK_DOWN_MS) laserLinkUp = false; }
+  bool want = (pathMode == 2) ? true : (pathMode == 1) ? false : !laserLinkUp;
+  if (want != failover) {
+    failover = want;
+    Serial.printf("[PATH] %s\n", failover ? "FAILOVER: LoRa is the active backup path" : "laser link is the active path");
+    loraSend('H', failover ? "FO,0" : "up,0");     // tell the peer right away
+  }
+}
+
+// ----------------------------------------------------------------- serial input
+static char lineBuf[48]; static int lineLen = 0; static bool lineMode = false;
+static char jsonBuf[256];
+static size_t jsonLen = 0;
+static bool jsonMode = false, jsonOverflow = false;
+
+// Backend protocol stays on loop/core 1; the audio task never prints JSON.
+static void emitStatus(uint32_t now, bool oneShot = false) {
+  // No periodic JSON formatting or USB TX while quiet and Wi-Fi is disconnected.
+  // Request a single report with s; Wi-Fi reports resume on connection.
+  const bool publishWifi = !oneShot && networkReports && WiFi.status() == WL_CONNECTED;
+  if (!statusLogsEnabled && !oneShot && !publishWifi) return;
+  JsonDocument d;
+  char unit[2] = {UNIT_ID, 0}, peer[2] = {lastPeer, 0};
+  d["t"] = "status"; d["unit"] = unit; d["up"] = now / 1000;
+  d["fs"] = FS_HZ; d["micSampling"] = micSamplingEnabled ? 1 : 0;
+  d["laser"] = laserLinkUp ? 1 : 0; d["env"] = (float)rxEnvOut;
+  d["thr"] = (float)linkThresh; d["mode"] = pathMode;
+  d["failover"] = failover ? 1 : 0;
+  d["tx"] = (int)txSrc; d["rx"] = (int)rxSink;
+  d["vol"] = (float)vol; d["rxGain"] = (float)rxGain;
+  d["micGain"] = (float)micGain;
+  d["duck"] = duckOn ? 1 : 0; d["gate"] = gateOn ? 1 : 0;
+  d["micP2P"] = micSamplingEnabled && micMax >= micMin ? (int)(micMax - micMin) : 0;
+  d["panP2P"] = (int)(panMax - panMin);
+  d["micMin"] = (int)micMin; d["micMax"] = (int)micMax;
+  d["panMin"] = (int)panMin; d["panMax"] = (int)panMax;
+  d["adcErrors"] = (uint32_t)adcErrors;
+  // Cumulative counts: compare their increases between status reports.
+  d["micSamples"] = (uint32_t)micSamples;
+  d["micRailSamples"] = (uint32_t)micRailSamples;
+  d["txClipSamples"] = (uint32_t)txClipSamples;
+  d["wifi"] = WiFi.status() == WL_CONNECTED ? 1 : 0;
+  d["wifiEnabled"] = wifiRuntimeEnabled ? 1 : 0;
+  d["http"] = (int)networkHttpCode;
+  d["commandDrops"] = (uint32_t)networkCommandDrops;
+  uint32_t wc = workCnt;
+  d["workAvg"] = wc ? workSum / wc : 0;
+  d["workMax"] = (uint32_t)workMax; d["over"] = (uint32_t)overruns;
+  d["cal"] = calEndMs ? 1 : 0;
+  // This firmware has no battery measurement.
+  d["batV"] = -1; d["batPct"] = -1;
+  JsonObject l = d["lora"].to<JsonObject>();
+  l["ok"] = loraOk ? 1 : 0; l["enabled"] = loraEnabled ? 1 : 0; l["peer"] = peer;
+  l["peerLaser"] = peerLaserUp ? 1 : 0;
+  l["ageS"] = lastPeerMs ? (long)((now - lastPeerMs) / 1000) : -1L;
+  l["rssi"] = lastRssi; l["snr"] = lastSnr;
+  l["tx"] = txCount; l["rx"] = rxCount;
+  if (statusLogsEnabled || oneShot) { serializeJson(d, Serial); Serial.println(); }
+  if (publishWifi) {
+    StatusPacket packet;
+    if (measureJson(d) < sizeof(packet.json)) {
+      serializeJson(d, packet.json, sizeof(packet.json));
+      xQueueOverwrite(networkReports, &packet); // Keep only the latest report when offline.
+    }
+  }
+}
+static void help() {
+  Serial.println(F("j microphone ADC sampling on/off (diagnostic; GPIO32 stays connected)"));
+  Serial.println(F("v Wi-Fi radio on/off (telemetry pauses while off)"));
+  Serial.println(F("s one status report | q periodic USB logs on/off (OFF at boot) | w Wi-Fi status"));
+  Serial.println(F("z radio on/off (diagnostic: stops LoRa TX/RX while off)"));
+  Serial.println(F("TX src: 4 mic  3 tone  2 blink  1 steady  0 off | RX: p panel  k tone  x mute"));
+  Serial.println(F("+/- volume  ]/[ rx gain  G/g mic gain  d duck  n gate"));
+  Serial.println(F("l path mode (AUTO/LASER/LORA)  c calibrate link threshold  b LoRa ping  >text send LoRa message"));
+}
+static void handleKey(char c) {
+  static uint32_t pingSeq = 0;
+  if (c >= '0' && c <= '4') txSrc = c - '0';
+  else if (c == 'p') rxSink = 0;
+  else if (c == 'k') rxSink = 1;
+  else if (c == 'x') rxSink = 2;
+  else if (c == '+') vol = clampf(vol + 0.05f, 0.05f, 1.0f);
+  else if (c == '-') vol = clampf(vol - 0.05f, 0.05f, 1.0f);
+  else if (c == ']') rxGain = clampf(rxGain * 1.25f, 1.0f, 60.0f);
+  else if (c == '[') rxGain = clampf(rxGain * 0.8f, 1.0f, 60.0f);
+  else if (c == 'G') micGain = clampf(micGain * 1.25f, 0.5f, 30.0f);
+  else if (c == 'g') micGain = clampf(micGain * 0.8f, 0.5f, 30.0f);
+  else if (c == 'd') duckOn = !duckOn;
+  else if (c == 'n') gateOn = !gateOn;
+  else if (c == 'l') { pathMode = (pathMode + 1) % 3; Serial.printf("[PATH MODE] %s\n", pathMode == 0 ? "AUTO" : pathMode == 1 ? "force LASER" : "force LORA"); }
+  else if (c == 'c') { calEndMs = millis() + 3000; calSum = 0; calCount = 0; Serial.println(F("[CAL] measuring noise for 3 s: cover the panel, laser off at the far end")); }
+  else if (c == 'b') { char p[16]; snprintf(p, sizeof p, "%lu", (unsigned long)++pingSeq); loraSend('P', p); Serial.println(F("[LORA] ping sent")); }
+  else if (c == 'z') {
+    if (!loraOk) { Serial.println(F("[RADIO] unavailable: LoRa initialization failed")); return; }
+    loraEnabled = !loraEnabled;
+    if (loraEnabled) { LoRa.idle(); lastHbMs = millis(); }
+    else LoRa.sleep();
+    Serial.println(loraEnabled ? F("[RADIO] ON") : F("[RADIO] OFF: LoRa TX/RX stopped; laser audio continues"));
+  }
+  else if (c == 'q') {
+    statusLogsEnabled = !statusLogsEnabled;
+    Serial.println(statusLogsEnabled ? F("[LOGS] periodic USB status ON") : F("[LOGS] periodic USB status OFF; Wi-Fi telemetry, audio and LoRa continue"));
+  }
+  else if (c == 's') emitStatus(millis(), true);
+  else if (c == 'j') {
+    micSamplingEnabled = !micSamplingEnabled;
+    Serial.println(micSamplingEnabled ? F("[MIC ADC] ON") : F("[MIC ADC] OFF: GPIO32 capture and mic modulation paused"));
+  }
+  else if (c == 'v') {
+    if (!networkReports) { Serial.println(F("[WIFI] no network task in this build/configuration")); return; }
+    wifiRuntimeEnabled = !wifiRuntimeEnabled;
+    Serial.println(wifiRuntimeEnabled ? F("[WIFI] enabling radio") : F("[WIFI] disabling radio; telemetry pauses"));
+  }
+  else if (c == 'w') {
+    Serial.printf("[WIFI] configured=%d connected=%d ip=%s HTTP=%d commandDrops=%u\n",
+      wifiConfigured(), WiFi.status() == WL_CONNECTED, WiFi.localIP().toString().c_str(),
+      (int)networkHttpCode, (unsigned)networkCommandDrops);
+  }
+  else if (c == 'h') help();
+}
+static void handleJson(const char *line) {
+  JsonDocument d;
+  if (deserializeJson(d, line)) return;
+  const char *cmd = d["cmd"] | "";
+  if (!strcmp(cmd, "set")) {
+    const char *k = d["k"] | "";
+    if (!d["v"].is<float>()) return;
+    float v = d["v"].as<float>();
+    if (!isfinite(v)) return;
+    if (!strcmp(k, "txSrc")) txSrc = (int)clampf(v, 0, 4);
+    else if (!strcmp(k, "rxSink")) rxSink = (int)clampf(v, 0, 2);
+    else if (!strcmp(k, "vol")) vol = clampf(v, 0.05f, 1);
+    else if (!strcmp(k, "rxGain")) rxGain = clampf(v, 1, 60);
+    else if (!strcmp(k, "micGain")) micGain = clampf(v, 0.5f, 30);
+    else if (!strcmp(k, "duck")) duckOn = v > 0;
+    else if (!strcmp(k, "gate")) gateOn = v > 0;
+  } else if (!strcmp(cmd, "mode")) pathMode = constrain((int)(d["v"] | 0), 0, 2);
+  else if (!strcmp(cmd, "cal")) handleKey('c');
+  else if (!strcmp(cmd, "ping")) handleKey('b');
+  else if (!strcmp(cmd, "msg")) {
+    const char *text = d["text"] | "";
+    if (*text) loraSend('M', text);
+  }
+}
+
+static void serialPoll() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (jsonMode) {
+      if (c == '\n' || c == '\r') {
+        jsonBuf[jsonLen] = 0;
+        if (!jsonOverflow) handleJson(jsonBuf);
+        jsonMode = false; jsonLen = 0; jsonOverflow = false;
+      } else if (jsonLen < sizeof(jsonBuf) - 1) jsonBuf[jsonLen++] = c;
+      else jsonOverflow = true; // Discard remainder; never interpret it as keys.
+    } else if (lineMode) {
+      if (c == '\n' || c == '\r') { lineBuf[lineLen] = 0; if (lineLen) { loraSend('M', lineBuf); Serial.printf("[LORA] sent: %s\n", lineBuf); } lineMode = false; lineLen = 0; }
+      else if (lineLen < (int)sizeof(lineBuf) - 1) lineBuf[lineLen++] = c;
+    } else if (c == '{') { jsonMode = true; jsonLen = 1; jsonBuf[0] = c; }
+    else if (c == '>') { lineMode = true; lineLen = 0; }
+    else handleKey(c);
+  }
+}
+
+// ----------------------------------------------------------------- setup / loop
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+#if !BEAMBI_WIFI_ENABLED
+  WiFi.mode(WIFI_OFF); // No background connection attempts in recovery builds.
+#endif
+  pinMode(PIN_LED, OUTPUT);
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+#if ESP_ARDUINO_VERSION_MAJOR < 3
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_12); // GPIO35 panel
+  adc1_config_channel_atten(ADC1_CHANNEL_4, ADC_ATTEN_DB_12); // GPIO32 microphone
+  adc_power_acquire(); // Keep the ADC powered during continuous audio sampling.
+  dac_output_enable(DAC_CHANNEL_1);
+#endif
+  laserInit();
+  laserWrite((uint32_t)(TX_BIAS * (float)MAXD));
+  dacWrite(PIN_DAC, 128);
+  rxHpf.highpass((float)FS_HZ, RX_HPF_HZ);
+  rxLpf.lowpass((float)FS_HZ, 1600.0f);
+  micHpf.highpass((float)FS_HZ, 250.0f);
+  micLpf.lowpass((float)FS_HZ, 1600.0f);
+
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  loraOk = LoRa.begin(LORA_FREQ);
+  if (loraOk) {
+    LoRa.setSpreadingFactor(LORA_SF); LoRa.setSignalBandwidth(LORA_BW); LoRa.setCodingRate4(LORA_CR);
+    LoRa.setSyncWord(LORA_SYNC); LoRa.enableCrc(); LoRa.setTxPower(LORA_POWER);
+    Serial.printf("LoRa OK: %.1f MHz SF%d BW%.0fkHz unit %c\n", LORA_FREQ / 1e6, LORA_SF, LORA_BW / 1e3, UNIT_ID);
+    if (!loraEnabled) {
+      LoRa.sleep();
+      Serial.println(F("[RADIO] OFF at boot for audio recovery; z enables LoRa"));
+    }
+  } else {
+    Serial.println(F("LoRa FAILED to start: check 3.3 V, SPI wires, NSS/RST/DIO0 pins and the band. Laser audio still runs."));
+  }
+
+  xTaskCreatePinnedToCore(sampleLoop, "sample", 4096, nullptr, configMAX_PRIORITIES - 2, &sampleTask, 0);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  sampleTimer = timerBegin(1000000);
+  timerAttachInterrupt(sampleTimer, &onSampleTimer);
+  timerAlarm(sampleTimer, 1000000 / FS_HZ, true, 0);
+#else
+  sampleTimer = timerBegin(0, 80, true);
+  timerAttachInterrupt(sampleTimer, &onSampleTimer, true);
+  timerAlarmWrite(sampleTimer, 1000000 / FS_HZ, true);
+  timerAlarmEnable(sampleTimer);
+#endif
+  Serial.println(F("BeamBi unit + LoRa backup. Send h for commands."));
+  Serial.println(F("[LOGS] periodic USB output OFF; s=one report, q=toggle periodic reports"));
+  Serial.printf("[WIRING] unit %c: microphone OUT must connect to GPIO%d; panel stays GPIO35; Wi-Fi build=%d\n",
+    UNIT_ID, PIN_MIC, BEAMBI_WIFI_ENABLED);
+  if (wifiConfigured()) {
+    networkReports = xQueueCreate(1, sizeof(StatusPacket));
+    networkCommands = xQueueCreate(20, sizeof(RemoteCommand));
+    if (!networkReports || !networkCommands ||
+        xTaskCreatePinnedToCore(networkLoop, "network", 8192, nullptr, 1, nullptr, 1) != pdPASS) {
+      if (networkReports) vQueueDelete(networkReports);
+      if (networkCommands) vQueueDelete(networkCommands);
+      networkReports = networkCommands = nullptr;
+      Serial.println(F("[WIFI] could not start network task; USB and laser audio remain available"));
+    }
+  } else Serial.println(BEAMBI_WIFI_ENABLED ? F("[WIFI] disabled: fill include/secrets.h (SSID, host, device key)") : F("[WIFI] OFF in audio recovery build"));
+}
+
+void loop() {
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  serialPoll();
+  RemoteCommand command;
+  if (networkCommands && xQueueReceive(networkCommands, &command, 0) == pdTRUE) handleJson(command.json);
+  loraPoll();
+  updatePath(now);
+
+  if (loraOk && loraEnabled && now - lastHbMs >= (failover ? HB_FAILOVER_MS : HB_MS)) {
+    lastHbMs = now;
+    char p[24]; snprintf(p, sizeof p, "%s,%u", failover ? "FO" : (laserLinkUp ? "up" : "down"), (unsigned)(rxEnvOut * 1000));
+    loraSend('H', p);
+  }
+  digitalWrite(PIN_LED, laserLinkUp ? HIGH : LOW);
+
+  if (now - last >= 1000) {
+    last = now;
+    emitStatus(now); // Wi-Fi reporting is independent of the q serial-log toggle.
+    micMin = 4095; micMax = 0; panMin = 4095; panMax = 0; panSum = 0; panCnt = 0;
+    rxPeak = 0; workSum = 0; workCnt = 0; workMax = 0;
+  }
+  delay(5);
+}

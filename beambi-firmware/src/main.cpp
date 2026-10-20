@@ -31,6 +31,7 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #if ESP_ARDUINO_VERSION_MAJOR < 3
 #include <driver/adc.h>
 #include <driver/dac.h>
@@ -73,6 +74,8 @@ constexpr float DUCK_THRESHOLD = 0.05f, DUCK_GAIN = 0.25f;
 static volatile int   txSrc = 4;
 static volatile int   rxSink = 0;
 static volatile float micGain = 1.0f;
+static float savedMicGain = 1.0f;
+static bool hasSavedMicGain = false;
 static volatile float rxGain = 8.0f;
 static volatile float vol = 0.60f;
 static volatile bool  duckOn = false;
@@ -91,6 +94,45 @@ struct Biquad { float b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0;
     float w0=2.0f*(float)M_PI*fc/fs, cs=cosf(w0), al=sinf(w0)/(2.0f*q), a0=1.0f+al;
     b0=((1.0f-cs)*0.5f)/a0; b1=(1.0f-cs)/a0; b2=b0; a1=(-2.0f*cs)/a0; a2=(1.0f-al)/a0; } };
 static inline float clampf(float v, float lo, float hi) { return v<lo?lo:(v>hi?hi:v); }
+
+// Load before sampling starts; write only on explicit S, never per sample or tick.
+static void loadMicGain() {
+  Preferences prefs;
+  if (!prefs.begin("beambi-audio", false)) {
+    Serial.println(F("[GAIN] storage unavailable; using microphone gain 1"));
+    return;
+  }
+  float value = prefs.getFloat("micGain", 1.0f);
+  bool stored = prefs.isKey("micGain");
+  prefs.end();
+  if (isfinite(value) && value >= 0.5f && value <= 30.0f) {
+    micGain = savedMicGain = value;
+    hasSavedMicGain = stored;
+  }
+  Serial.printf("[GAIN] startup micGain=%.2f (%s)\n", (float)micGain,
+    hasSavedMicGain ? "saved" : "default; G/g adjust, S saves");
+}
+
+static void saveMicGain() {
+  float value = micGain;
+  if (!isfinite(value) || value < 0.5f || value > 30.0f) return;
+  if (hasSavedMicGain && value == savedMicGain) {
+    Serial.printf("[GAIN] micGain=%.2f already saved\n", value);
+    return;
+  }
+  Preferences prefs;
+  if (!prefs.begin("beambi-audio", false)) {
+    Serial.println(F("[GAIN] save FAILED: storage unavailable"));
+    return;
+  }
+  size_t written = prefs.putFloat("micGain", value);
+  prefs.end();
+  if (written == sizeof(float)) {
+    savedMicGain = value;
+    hasSavedMicGain = true;
+    Serial.printf("[GAIN] saved micGain=%.2f; restored after power cycle\n", value);
+  } else Serial.println(F("[GAIN] save FAILED; gain has not been confirmed stored"));
+}
 
 // ----------------------------------------------------------------- state
 static TaskHandle_t sampleTask = nullptr;
@@ -297,6 +339,7 @@ static void emitStatus(uint32_t now, bool oneShot = false) {
   d["tx"] = (int)txSrc; d["rx"] = (int)rxSink;
   d["vol"] = (float)vol; d["rxGain"] = (float)rxGain;
   d["micGain"] = (float)micGain;
+  d["savedMicGain"] = hasSavedMicGain ? savedMicGain : -1.0f;
   d["duck"] = duckOn ? 1 : 0; d["gate"] = gateOn ? 1 : 0;
   d["micP2P"] = (int)(micMax - micMin);
   d["panP2P"] = (int)(panMax - panMin);
@@ -324,6 +367,7 @@ static void emitStatus(uint32_t now, bool oneShot = false) {
 }
 static void help() {
   Serial.println(F("s one status report | q periodic USB logs on/off (ON at boot)"));
+  Serial.println(F("S save current microphone gain for battery/reboot operation (G/g adjust)"));
   Serial.println(F("z radio on/off (diagnostic: stops LoRa TX/RX while off)"));
   Serial.println(F("TX src: 4 mic  3 tone  2 blink  1 steady  0 off | RX: p panel  k tone  x mute"));
   Serial.println(F("+/- volume  ]/[ rx gain  G/g mic gain  d duck  n gate"));
@@ -358,6 +402,7 @@ static void handleKey(char c) {
     Serial.println(statusLogsEnabled ? F("[LOGS] periodic USB status ON") : F("[LOGS] periodic USB status OFF; USB dashboard reports paused"));
   }
   else if (c == 's') emitStatus(millis(), true);
+  else if (c == 'S') saveMicGain();
   else if (c == 'h') help();
 }
 static void handleJson(const char *line) {
@@ -408,6 +453,7 @@ static void serialPoll() {
 void setup() {
   Serial.begin(115200);
   delay(300);
+  loadMicGain();
   pinMode(PIN_LED, OUTPUT);
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);

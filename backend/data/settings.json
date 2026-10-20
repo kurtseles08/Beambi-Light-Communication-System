@@ -1,6 +1,6 @@
 {
   "mode": "auto",
-  "failBelow": 50,
+  "failBelow": 34,
   "lockAbove": 60,
   "failDelaySec": 3,
   "recoverHoldSec": 5,
