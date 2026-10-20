@@ -81,7 +81,7 @@ function Slider({
       <div className="flex items-baseline justify-between text-sm text-moss-600">
         <span>{label}</span>
         <span className="font-mono text-forest-900">
-          {(local ?? value).toFixed(2)}
+          {(local ?? value).toFixed(Math.min(4, Math.max(2, Math.ceil(-Math.log10(step)))))}
         </span>
       </div>
       <input
@@ -207,6 +207,8 @@ function UnitView({
   const last = pongs.at(-1);
   const haveBat = d.batV !== undefined && d.batV > 0;
   const haveBatPct = d.batPct !== undefined && d.batPct >= 0;
+  const sampleRate = d.fs && d.fs > 0 ? d.fs : 8000;
+  const sampleBudget = 1_000_000 / sampleRate;
 
   return (
     <>
@@ -371,9 +373,26 @@ function UnitView({
                 ? "Calibrating (3 s)..."
                 : `Calibrate link threshold (Unit ${selected})`}
             </button>
+            <Sub>For noise calibration, leave the receiving panel uncovered in normal lighting, switch the far laser off, and stay quiet for 3 seconds. Then restore the laser. Covering the panel can change electrical pickup.</Sub>
+            {d.audioV === 1 ? (
+              <>
+                <Slider label={`Actual lock threshold (Unit ${selected})`} k="linkThresh"
+                  min={0.005} max={1} step={0.005} value={d.thr}
+                  disabled={dis || d.cal === 1} send={sendUnit} />
+                <Sub>Set above the idle noise envelope and below the speaking envelope. Dashboard display-zone sliders do not change this device threshold. A lower value can mistake buzz for voice.</Sub>
+                <button disabled={dis} className={d.rxGate ? btnOn : btn}
+                  onClick={() => sendUnit({ cmd: "set", k: "rxGate", v: d.rxGate ? 0 : 1 })}>
+                  Receiver noise gate: {d.rxGate ? "On" : "Off"}
+                </button>
+                <Slider label={`Receiver noise floor (Unit ${selected})`} k="rxNoiseFloor"
+                  min={0.0005} max={Math.max(0.05, d.rxNoiseFloor ?? 0.008)} step={0.0005}
+                  value={d.rxNoiseFloor ?? 0.008} disabled={dis} send={sendUnit} />
+                <Sub>The receiver gate attenuates pauses; it cannot remove buzz mixed into speech. Calibrate again after changing RX gain. These audio adjustments reset at reboot.</Sub>
+              </>
+            ) : <Sub>Upload the updated audio firmware to adjust the real lock threshold and receiver noise gate here.</Sub>}
             {d.cal === 1 && (
               <p className="text-xs text-warn-ink">
-                Cover the panel and switch the far laser off.
+                Keep the panel uncovered in normal lighting, switch the far laser off, and stay quiet.
               </p>
             )}
           </div>
@@ -444,6 +463,17 @@ function UnitView({
               }
             />
           )}
+          {!haveBat && <Row label="Battery" value="Not measured (no battery sensor)" />}
+          <Row label="Dashboard transport" value={d.transport ?? "USB"} />
+          <Row label="Wi-Fi" value={d.wifi === 0 ? "Off (GPIO13 available)" : d.wifi === 1 ? "On" : "Not reported"} />
+          <Row label="Microphone ADC errors" value={d.adcErrors ?? "Not reported"}
+            tone={(d.adcErrors ?? 0) > 0 ? "crit" : "default"} />
+          <Row label="Microphone ADC min / max" value={d.micMin === undefined || d.micMax === undefined
+            ? "Not reported" : `${d.micMin} / ${d.micMax}`}
+            tone={d.micMin !== undefined && d.micMax !== undefined && (d.micMin <= 8 || d.micMax >= 4087) ? "warn" : "default"} />
+          {d.micMin !== undefined && d.micMax !== undefined && (d.micMin <= 8 || d.micMax >= 4087) && (
+            <Sub>Microphone input reaches an ADC rail. Lower the microphone module gain and check its input level; software gain cannot recover clipped samples.</Sub>
+          )}
           <Row
             label="Mic peak-to-peak"
             value={d.micP2P}
@@ -457,7 +487,7 @@ function UnitView({
           <Row
             label="Work avg / max"
             value={`${d.workAvg} / ${d.workMax} µs`}
-            tone={d.workMax > 125 ? "warn" : "default"}
+            tone={d.workMax > sampleBudget ? "warn" : "default"}
           />
           <Row
             label="Overruns"
@@ -466,12 +496,12 @@ function UnitView({
           />
           <div className="mt-3">
             <Bar
-              pct={Math.min(100, (d.workAvg / 125) * 100)}
-              tone={d.workAvg > 100 ? "warn" : "ok"}
+              pct={Math.min(100, (d.workAvg / sampleBudget) * 100)}
+              tone={d.workAvg > sampleBudget * 0.8 ? "warn" : "ok"}
             />
           </div>
           <Sub>
-            The saPanelbudget is 125 µs at 8 kHz. A peak-to-peak near 0 or 4095
+            The sampling budget is {sampleBudget.toFixed(0)} µs at {(sampleRate / 1000).toFixed(2)} kHz. A peak-to-peak near 0 or 4095
             means a stuck or saturated ADC input.
           </Sub>
         </Panel>
@@ -501,10 +531,10 @@ export default function HardwarePage() {
   if (!unitsOnline.A && !unitsOnline.B)
     return (
       <Message title="No unit connected" tone="crit">
-        No reports from Unit A or Unit B. Wi-Fi: check that each unit has power,
-        joined the Wi-Fi, and that DEVICE_KEY matches. USB: check the cable and
-        SERIAL_PATH, and that no other program (Serial Monitor, Arduino IDE) is
-        using the port.
+        No reports from Unit A or Unit B. For battery operation, upload unit_a
+        to A and unit_b to B, enable laptop Bluetooth, and set BLE_ENABLED=true
+        in backend/.env. Keep Unit A within Bluetooth range of the laptop.
+        Unit B reports through Unit A over LoRa. USB is optional after uploading.
       </Message>
     );
 
@@ -546,7 +576,7 @@ export default function HardwarePage() {
         <Panel title={`Unit ${selected} is offline`} tone="crit" index={1}>
           <p className="text-[15px]">
             No report from Unit {selected} for 5 seconds. Check its power and
-            Wi-Fi (or the USB cable). The other unit is still available on its
+            Bluetooth / LoRa connection. The other unit is still available on its
             tab.
           </p>
         </Panel>

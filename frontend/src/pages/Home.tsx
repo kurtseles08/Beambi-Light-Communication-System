@@ -24,7 +24,7 @@ const STATE_TONE: Record<LinkState, Tone> = {
 const COMM: Record<CommLevel, { tone: Tone; note: string }> = {
   normal: { tone: 'ok', note: 'The optical link is locked and carrying traffic.' },
   degraded: { tone: 'warn', note: 'The link is up but weaker than normal, or the mode was set by hand.' },
-  emergency: { tone: 'crit', note: 'The optical link failed. Traffic is running on the RF fallback.' },
+  emergency: { tone: 'crit', note: 'The optical link failed. LoRa carries telemetry only; voice is unavailable until the laser link recovers.' },
   offline: { tone: 'default', note: 'No fresh data from the backend.' },
 }
 
@@ -48,7 +48,7 @@ function LoraSummary({ index }: { index: number }) {
     return (
       <Panel title="Device" tone="crit" index={index} className="lg:col-span-8">
         <Big stencil size="md" tone="crit">Disconnected</Big>
-        <Sub>No reports from the unit shown on the Hardware page. Check its power, Wi-Fi and key (or the USB cable and SERIAL_PATH).</Sub>
+        <Sub>No reports from the summary unit. Check battery power, laptop Bluetooth and the connection to Unit A. For Unit B, check its LoRa link to Unit A. See the Hardware page for connection guidance.</Sub>
       </Panel>
     )
   }
@@ -108,7 +108,7 @@ export default function Home() {
       <div className="grid gap-5 lg:grid-cols-12">
         <Panel title="Active channel" tone={onFso ? 'ok' : 'warn'} index={1} className="lg:col-span-4">
           <Big stencil tone={onFso ? 'ok' : 'warn'}>{latest.activeChannel}</Big>
-          <Sub>{onFso ? 'Free-space optical link (laser beam)' : 'LoRa radio fallback'}</Sub>
+          <Sub>{onFso ? 'Free-space optical link (laser beam)' : 'LoRa telemetry; voice needs the laser link'}</Sub>
           <div className="mt-4">
             <Row label="Operating mode" value={MODE_LABEL[latest.mode]} tone={manual ? 'warn' : 'default'} />
             <Row label="Codec in use" value={latest.rf.codec} />

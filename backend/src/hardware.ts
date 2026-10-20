@@ -85,7 +85,8 @@ export function createHardware(getSettings: () => Settings) {
     // The firmware owns mode, channel and the laser flag. The dashboard only mirrors them.
     const devMode: Mode = live.find((x) => x.r.mode)?.r.mode ?? s.mode
     const channel: Channel = live.some((x) => x.r.channel === 'RF') ? 'RF' : 'FSO'
-    const allLaser = live.every((x) => x.r.laserOk === true)
+    // A single reporting receiver cannot establish a working two-way optical link.
+    const allLaser = !!A && !!B && live.every((x) => x.r.laserOk === true)
 const state: LinkState = channel === 'RF' ? 'Failover' : allLaser ? 'Locked' : 'Searching'
     const events: LinkEvent[] = []
     const addEvent = (severity: Severity, type: string, message: string, extra: Partial<LinkEvent> = {}) =>
@@ -127,9 +128,8 @@ const state: LinkState = channel === 'RF' ? 'Failover' : allLaser ? 'Locked' : '
     const dir = (from?: Stored, to?: Stored): Direction => {
       const sent = num(from?.r.txFrames) ?? 0
       const recv = num(to?.r.rxFrames) ?? 0
-      const rf = num(to?.r.rfRssi) ?? -120
       return {
-        connected: to !== undefined && (channel === 'FSO' ? to.r.laserOk === true : rf > -115),
+        connected: from !== undefined && to !== undefined && channel === 'FSO' && to.r.laserOk === true,
         bitrateKbps: num(to?.r.bitrateKbps) ?? 0,
         latencyMs: Math.round(num(to?.r.latencyMs) ?? 0),
         jitterMs: num(to?.r.jitterMs) ?? 0,
@@ -171,9 +171,9 @@ rxPresent: allLaser,
         rssi: rfVals.length ? avg(rfVals) : -120,
         snr: avg(vals((r) => r.rfSnr)),
         channel: Math.round(vals((r) => r.rfChannel)[0] ?? 0),
-        hopSync: live.every((x) => x.r.hopSync !== false),
+        hopSync: live.every((x) => x.r.hopSync === true),
         retransmissions: Math.max(0, ...vals((r) => r.retransmissions)),
-        codec: channel === 'FSO' ? 'Laser audio' : 'LoRa', // label only, adjust to your firmware
+        codec: channel === 'FSO' ? 'Laser audio' : 'LoRa telemetry (no voice)',
         encrypted,
       },
       ab: dir(A, B),

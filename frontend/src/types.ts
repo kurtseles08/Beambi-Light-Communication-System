@@ -121,6 +121,15 @@ export type Run = {
 
 // ---- Firmware (ESP32) interface ----
 export type DeviceStatus = {
+  fs?: number
+  audioV?: number
+  rxGate?: number
+  rxNoiseFloor?: number
+  transport?: string
+  adcErrors?: number
+  micMin?: number
+  micMax?: number
+  wifi?: number
   t: 'status'
   unit: UnitId
   batV?: number // volts, -1 when no battery is wired
@@ -161,7 +170,7 @@ export type LoraMessage = { id: string; ts: number; from: string; rssi: number; 
 export type PongRecord = { id: string; ts: number; from: string; seq: string; rssi: number; snr: number }
 
 export type DeviceCommand =
-  | { cmd: 'set'; k: 'txSrc' | 'rxSink' | 'vol' | 'rxGain' | 'micGain' | 'duck' | 'gate'; v: number }
+  | { cmd: 'set'; k: 'txSrc' | 'rxSink' | 'vol' | 'rxGain' | 'micGain' | 'duck' | 'gate' | 'linkThresh' | 'rxGate' | 'rxNoiseFloor'; v: number }
   | { cmd: 'mode'; v: 0 | 1 | 2 }
   | { cmd: 'cal' }
   | { cmd: 'ping' }

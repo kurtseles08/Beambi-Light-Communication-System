@@ -117,7 +117,7 @@ export default function Settings() {
       <div className="grid gap-5 lg:grid-cols-12">
         {/* Failover thresholds (read-only) */}
         <Panel title="Signal zones" index={1} className="lg:col-span-6"
-  right={<button className={ghostBtn} onClick={() => update({ failBelow: 50, lockAbove: 60 })}><RotateCcw size={14} /> Match unit</button>}>
+  right={<button className={ghostBtn} onClick={() => update({ failBelow: 42, lockAbove: 50 })}><RotateCcw size={14} /> Match unit</button>}>
   <ZoneBar rssi={rssi} fail={s.failBelow} lock={s.lockAbove} />
   <div className="mt-3">
     <Slider label="Failover below (RSSI)" value={s.failBelow} min={1} max={Math.max(1, s.lockAbove - 1)}
@@ -129,7 +129,7 @@ export default function Settings() {
   </div>
   <Row label="Band between the zones" value={`${s.lockAbove - s.failBelow} pts`} />
   <p className="mt-2 text-[13px] leading-snug text-moss-600">
-    These are display zones only. The units decide when to switch, using the threshold set by Calibrate on the Hardware page.
+    These are display zones only. Match unit uses 50 for acquisition and about 42 for release on the relative signal scale. The real threshold, noise calibration and hold times are controlled by the firmware on the Hardware page.
   </p>
 </Panel>
 

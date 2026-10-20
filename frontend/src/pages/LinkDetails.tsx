@@ -146,7 +146,8 @@ function RfTab() {
           <Row label="SNR" value={heard ? `${d.lora.snr} dB` : 'Unknown'} />
           <Row label="Last heard" value={d.lora.ageS < 0 ? 'Never' : `${d.lora.ageS}s ago`} tone={stale ? 'warn' : 'default'} />
           <Row label="Packets sent / received" value={`${d.lora.tx} / ${d.lora.rx}`} />
-          <Row label="Carrying traffic" value={active ? 'Yes, the laser is down' : 'No, standby'} tone={active ? 'warn' : 'default'} />
+          <Row label="Voice over LoRa" value="Not implemented; telemetry and commands only" />
+          <Row label="Selected fallback" value={active ? 'LoRa (laser unavailable or forced RF)' : 'Laser'} tone={active ? 'warn' : 'default'} />
         </div>
       </Panel>
     </div>

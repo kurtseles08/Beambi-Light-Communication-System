@@ -2,6 +2,46 @@
 
 ## Current firmware update (2026-10-20)
 
+Current integration state supersedes historical notes below:
+- Unit A MAC 28:05:a5:e2:84:64 currently COM11; Unit B MAC
+  68:09:47:9d:8c:38 currently COM9. Verify identity before uploading; ports change.
+- Both have audioV=1/protocol-v2 firmware uploaded. GPIO13 microphone,
+  GPIO35 panel, Wi-Fi OFF, sample rate 5000 Hz, voice LPF 2000 Hz.
+- B -> LoRa -> A -> BLE Nordic UART -> laptop backend -> dashboard.
+  Backend BLE_ENABLED=true, SERIAL_PATHS/SERIAL_PATH empty: USB diagnostic
+  cables are NOT dashboard data sources. Python Bleak is in backend/.venv.
+- B passed standalone tests: no resets, ADC errors 0, LoRa transmit counter
+  advancing. Both units then exchanged LoRa reports, but A repeatedly reset.
+- A USB log confirmed task watchdog: IDLE0 starved, CPU0 running sample task.
+  Replaced one-tick recovery with two scheduler ticks every 100 ms. Watchdog
+  stays enabled; missed sample ticks remain counted. BLE requests MTU185,
+  chunks up to180 bytes when negotiated, default20 fallback. A fix uploaded
+  successfully to COM11; B standalone firmware was already stable.
+- AFTER this fix, verify_bluetooth.py COM9 B and COM11 A each matched THREE
+  complete raw board reports against backend values, every raw field identical.
+  Transports lora+bluetooth and bluetooth respectively; wifi=0, adcErrors=0.
+  GET /api/device?unit=A|B is available; no query retains summary behavior.
+- Combined run PASSED: 90 seconds of API polling with both units online,
+  no uptime resets, zero ADC errors, expected wireless transports. A uptime
+  advanced from56 to at least137 seconds. Battery-only validation pending.
+  User has both powered, A connected USB for diagnostics. Never claim battery
+  integration or audible speech quality verified from USB diagnostics alone.
+- A raw microphone still reaches ADC rails (0/4095), B about 2890..3010.
+  A workAvg about182 us/200 us budget and missed samples roughly3.5 percent.
+  Software gain/filtering cannot repair analog input clipping. Audio quality
+  needs listening/analog input adjustment; do not claim the buzz is removed.
+
+Audio controls: user heard buzz louder than speech; covering the panel increases
+buzz; RX Mute removes it. Do not invent a buzz frequency. Receiver gate defaults
+ON, noiseFloor=.008, opens at3x/closes1.5x floor, closed gain0.1 (~20dB), smooth
+attack/release. It suppresses pauses, not in-band buzz during speech. Actual
+linkThresh default .05 (previously .10), acquisition100ms, release below70% for3s.
+Envelope detection is not proof of alignment. Controls reset on reboot.
+Calibration: far laser OFF, panel UNCOVERED in normal lighting, quiet3s; restore
+laser afterward. Noise floor is measured; threshold2.5x mean, minimum.005.
+Native DSP/208-byte codec tests, Python bridge tests, firmware/backend/frontend
+builds have passed. Any later firmware changes need relevant revalidation.
+
 Battery-gain fix added after rollback: G/g gain adjustments were RAM-only and
 reset to 1 after switching power. Uppercase S now explicitly saves microphone
 gain to Preferences/NVS and loads it before audio sampling starts. Lowercase s

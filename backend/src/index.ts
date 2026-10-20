@@ -8,6 +8,7 @@ import { createStore } from './store.js'
 import { loadSettings, sanitize, saveSettings } from './settings.js'
 import { createHardware, type UnitReport } from './hardware.js'
 import { createSerialBridge, type DeviceBridge } from './serial.js'
+import { startBluetoothBridge } from './ble.js'
 import type {
   DeviceCommand, DeviceStatus, LinkEvent, LoraMessage,
   PongRecord, Reading, Settings, UnitId,
@@ -69,9 +70,17 @@ function setDeviceConnected(c: boolean) {
 }
 
 // ---------------------------------------------------------------- HTTP routes
-app.get('/health', (_req, res) => res.json({ status: 'ok', source: 'hardware', deviceConnected, time: new Date().toISOString() }))
+app.get('/health', (_req, res) => res.json({ status: 'ok', source: 'hardware', deviceConnected,
+  transport: device?.transport ?? null, time: new Date().toISOString() }))
 app.get('/api/latest', (_req, res) => res.json(readings.at(-1) ?? null))
-app.get('/api/device', (_req, res) => res.json(device))
+app.get('/api/device', (req, res) => {
+  const unit = req.query.unit
+  if (unit !== undefined && unit !== 'A' && unit !== 'B') {
+    res.status(400).json({ error: 'unit must be A or B' })
+    return
+  }
+  res.json(unit ? devices[unit] : device)
+})
 app.get('/api/history', (req, res) => {
   const minutes = Math.min(1440, Math.max(1, Number(req.query.minutes) || 60))
   res.json({ samples: store.history(minutes), persistence: store.persistence })
@@ -108,7 +117,8 @@ function onDeviceLine(o: Record<string, unknown>) {
   switch (o.t) {
     case 'status': {
       const s = o as unknown as DeviceStatus
-      if (typeof s.env !== 'number' || (s.unit !== 'A' && s.unit !== 'B')) return
+      if (!Number.isFinite(s.env) || !Number.isFinite(s.thr) || !s.lora ||
+          (s.unit !== 'A' && s.unit !== 'B')) return
       devices[s.unit] = { ...s, ts: Date.now() }
       lastSeen[s.unit] = Date.now()
       io.emit('devices', devices)
@@ -170,37 +180,45 @@ function onDeviceLine(o: Record<string, unknown>) {
 const serialPaths = [...new Set((process.env.SERIAL_PATHS || process.env.SERIAL_PATH || '')
   .split(',').map((path) => path.trim()).filter(Boolean))]
 for (const path of serialPaths) {
-  let reportedUnit: UnitId | null = null
+  // One USB gateway can report both its own unit and a LoRa peer.
+  const routes = new Map<UnitId, DeviceBridge>()
   const bridge = createSerialBridge({
     path,
     baudRate: Number(process.env.SERIAL_BAUD) || 115200,
     onLine: (o) => {
       if (o.t === 'status' && typeof o.env === 'number' && (o.unit === 'A' || o.unit === 'B')) {
-        if (reportedUnit && reportedUnit !== o.unit && serialUnits[reportedUnit] === bridge) {
-          delete serialUnits[reportedUnit]
-        }
-        if (serialUnits[o.unit] && serialUnits[o.unit] !== bridge) {
+        const unit = o.unit
+        let route = routes.get(unit)
+        if (serialUnits[unit] && serialUnits[unit] !== route) {
           console.warn(`[serial] Duplicate UNIT_ID ${o.unit} reported on ${path}; check firmware IDs`)
         }
-        reportedUnit = o.unit
-        serialUnits[o.unit] = bridge
+        if (!route) {
+          route = { send: (cmd) => bridge.send({ ...cmd, target: unit }), isOpen: bridge.isOpen }
+          routes.set(unit, route)
+        }
+        serialUnits[unit] = route
       }
       onDeviceLine(o)
     },
     onConnection: (connected) => {
-      if (!connected && reportedUnit && serialUnits[reportedUnit] === bridge) {
-        delete serialUnits[reportedUnit]
+      if (!connected) {
+        for (const [unit, route] of routes) {
+          if (serialUnits[unit] === route) delete serialUnits[unit]
+        }
       }
     },
   })
 }
-if (!serialPaths.length && !DEVICE_KEY) {
-  console.warn('Neither SERIAL_PATHS, SERIAL_PATH nor DEVICE_KEY is set: no hardware can connect')
+if (!serialPaths.length) {
+  console.log(process.env.BLE_ENABLED === 'true'
+    ? '[hardware] Bluetooth mode: USB disabled. Waiting for BeamBi-A and its LoRa peer.'
+    : '[hardware] No transport configured. Enable BLE_ENABLED=true for battery mode or set SERIAL_PATHS for USB.')
 }
 
 // ---------------------------------------------------------------- command validation
 const SET_RANGES: Record<string, [number, number]> = {
   txSrc: [0, 4], rxSink: [0, 2], vol: [0.05, 1], rxGain: [1, 60], micGain: [0.5, 30], duck: [0, 1], gate: [0, 1],
+  linkThresh: [0.005, 1], rxGate: [0, 1], rxNoiseFloor: [0.0005, 0.3],
 }
 
 function validateCommand(c: unknown): DeviceCommand | null {
@@ -332,4 +350,7 @@ setInterval(() => {
 }, TICK_MS)
 
 const PORT = process.env.PORT || 4000
-server.listen(PORT, () => console.log(`Backend running on port ${PORT}`))
+server.listen(PORT, () => {
+  console.log(`Backend running on port ${PORT}`)
+  startBluetoothBridge()
+})
