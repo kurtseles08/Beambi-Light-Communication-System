@@ -1,7 +1,7 @@
+import { useTelemetry, useFreshDevices } from '../hooks/useTelemetry'
 import type { CSSProperties } from 'react'
 import { useLink, BACKEND_URL } from '../store/link'
 import { useNow } from '../hooks/useNow'
-import { useDevice } from '../device/deviceStore'
 import Panel from '../components/Panel'
 import Gauge from '../components/Gauge'
 import { Big, Pill, Row, SourceTag, Sub, toneSolid, type Tone } from '../components/ui'
@@ -14,17 +14,14 @@ const MODE_LABEL = { auto: 'Auto', fso: 'Force FSO', rf: 'Force RF' } as const
 
 const STATE_TONE: Record<LinkState, Tone> = {
   Searching: 'default',
-  Aligning: 'default',
   Locked: 'ok',
-  Degraded: 'warn',
   Failover: 'crit',
-  'Re-acquiring': 'warn',
 }
 
 const COMM: Record<CommLevel, { tone: Tone; note: string }> = {
-  normal: { tone: 'ok', note: 'The optical link is locked and carrying traffic.' },
-  degraded: { tone: 'warn', note: 'The link is up but weaker than normal, or the mode was set by hand.' },
-  emergency: { tone: 'crit', note: 'The optical link failed. LoRa carries telemetry only; voice is unavailable until the laser link recovers.' },
+  normal: { tone: 'ok', note: 'Both units report a laser indication. Listen at the units to verify voice quality.' },
+  degraded: { tone: 'warn', note: 'Laser indication is incomplete, or a manual mode is selected.' },
+  emergency: { tone: 'crit', note: 'The firmware indicates optical fallback. LoRa carries telemetry only; verify the optical audio path at the units.' },
   offline: { tone: 'default', note: 'No fresh data from the backend.' },
 }
 
@@ -42,8 +39,7 @@ function Header() {
 
 // What the real unit knows about its LoRa peer
 function LoraSummary({ index }: { index: number }) {
-  const d = useDevice((s) => s.device)
-  const linked = useDevice((s) => s.deviceConnected)
+  const { device: d, deviceConnected: linked } = useFreshDevices()
   if (!linked || !d) {
     return (
       <Panel title="Device" tone="crit" index={index} className="lg:col-span-8">
@@ -67,9 +63,8 @@ function LoraSummary({ index }: { index: number }) {
 }
 
 export default function Home() {
-  const latest = useLink((s) => s.latest)
+  const { latest, connected } = useTelemetry()
   const events = useLink((s) => s.events)
-  const connected = useLink((s) => s.connected)
   const settings = useLink((s) => s.settings)
   const now = useNow()
 
@@ -80,7 +75,7 @@ export default function Home() {
         <Panel title="Waiting for data" index={1}>
           <p className="text-[15px]">
             {connected
-              ? 'Connected. Waiting for the first reading...'
+              ? 'No fresh unit reports. Check unit power and the Bluetooth or USB connection.'
               : `Cannot reach the backend at ${BACKEND_URL}. Start everything with npm run dev from the project root.`}
           </p>
         </Panel>
@@ -111,7 +106,6 @@ export default function Home() {
           <Sub>{onFso ? 'Free-space optical link (laser beam)' : 'LoRa telemetry; voice needs the laser link'}</Sub>
           <div className="mt-4">
             <Row label="Operating mode" value={MODE_LABEL[latest.mode]} tone={manual ? 'warn' : 'default'} />
-            <Row label="Codec in use" value={latest.rf.codec} />
           </div>
         </Panel>
 
@@ -137,9 +131,9 @@ export default function Home() {
         </Panel>
 
         <Panel title="FSO signal strength" tone={zoneTone} index={4} className="lg:col-span-4"
-          right={<Pill tone={zoneTone}>{zone === 'locked' ? 'Above lock' : zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
+          right={<Pill tone={zoneTone}>{zone === 'locked' ? 'High signal' : zone === 'marginal' ? 'Marginal' : 'Low signal'}</Pill>}>
           <Gauge value={f.rssi} fail={settings.failBelow} lock={settings.lockAbove} />
-          <Sub>Weakest of the two receivers, 0 to 100. 50 is the unit's failover point.</Sub>
+          <Sub>Lowest score among reporting receivers, 0–100, derived from envelope and threshold. A score of 50 equals the configured device threshold.</Sub>
 <div className="mt-3">
   {(['A', 'B'] as const).map((u) => {
     const x = latest.units[u]
@@ -156,7 +150,7 @@ export default function Home() {
 
         <Panel title="Session" index={6} className="lg:col-span-6">
           <Big mono size="md">{formatDuration(session.uptimeSec)}</Big>
-          <Sub>System uptime</Sub>
+          <Sub>Backend session duration</Sub>
           <div className="mt-3">
             <Row label="Failovers" value={session.failovers} />
           </div>

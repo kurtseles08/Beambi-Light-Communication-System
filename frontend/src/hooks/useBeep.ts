@@ -34,7 +34,8 @@ export function useBeep(enabled: boolean, rssi: number | null, volume: number) {
     const ctx = ctxRef.current
     const osc = oscRef.current
     const gain = gainRef.current
-    if (!enabled || !ctx || !osc || !gain || rssi === null) return
+    if (!enabled || !ctx || !osc || !gain) return
+    if (rssi === null) { gain.gain.setTargetAtTime(0, ctx.currentTime, 0.05); return }
     osc.frequency.setTargetAtTime(beepHz(rssi), ctx.currentTime, 0.08)
     gain.gain.setTargetAtTime(rssi < 5 ? 0 : volume * 0.15, ctx.currentTime, 0.05)
   }, [enabled, rssi, volume])

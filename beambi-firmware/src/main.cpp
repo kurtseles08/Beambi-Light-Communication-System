@@ -58,7 +58,6 @@ constexpr long     LORA_BW    = 125E3;
 constexpr int      LORA_CR    = 5;          // 4/5
 constexpr int      LORA_POWER = 14;         // dBm
 constexpr int      LORA_SYNC  = 0xB1;
-constexpr uint32_t HB_MS = 2000, HB_FAILOVER_MS = 1000;
 
 // ----------------------------------------------------------------- audio tunables
 constexpr int      FS_HZ          = 5000; // Exact 200 us period; leaves CPU headroom for BLE and idle housekeeping.
@@ -151,9 +150,8 @@ static bool  gateOpenState = false;
 static float tonePhase = 0, spkPhase = 0;
 static uint32_t tick = 0;
 
-static volatile float rxEnvOut = 0, rxPeak = 0;
+static volatile float rxEnvOut = 0;
 static volatile int   micMin = 4095, micMax = 0, panMin = 4095, panMax = 0;
-static volatile uint32_t panSum = 0, panCnt = 0;
 static volatile uint32_t overruns = 0, workMax = 0, workSum = 0, workCnt = 0;
 static volatile uint32_t adcErrors = 0;
 static volatile uint32_t micRailSamples = 0, micSamples = 0, txClipSamples = 0;
@@ -200,7 +198,6 @@ static void sampleLoop(void *) {
     if (rawMic > micMax) micMax = rawMic;
     if (rawPan < panMin) panMin = rawPan;
     if (rawPan > panMax) panMax = rawPan;
-    panSum += rawPan; panCnt++;
 
     // RX: panel -> DC track -> HPF -> gain -> speaker
     rxDc += DC_TRACK * ((float)rawPan - rxDc);
@@ -208,7 +205,6 @@ static void sampleLoop(void *) {
     float ra = clampf(y * rxGain, -1.0f, 1.0f);
     rxEnv += ENV_TRACK * (fabsf(ra) - rxEnv);
     rxEnvOut = rxEnv;
-    if (fabsf(y) > rxPeak) rxPeak = fabsf(y);
 
     float out;
     int sink = rxSink;
@@ -269,7 +265,7 @@ static bool     loraEnabled = true; // Restored pre-Wi-Fi behavior; z can pause 
 static bool     statusLogsEnabled = true; // Restored USB dashboard reports; q can pause them.
 static uint32_t lastTelemetryMs = 0;
 static void handleJson(const char *line);
-static uint32_t loraSeq = 0, lastHbMs = 0, lastPeerMs = 0, txCount = 0, rxCount = 0;
+static uint32_t lastPeerMs = 0, txCount = 0, rxCount = 0;
 static int      lastRssi = 0; static float lastSnr = 0;
 static char     lastPeer = '-'; static bool peerLaserUp = false;
 static int      pathMode = 0;             // 0 AUTO, 1 force LASER, 2 force LORA
@@ -433,7 +429,7 @@ static void handleKey(char c) {
   else if (c == 'z') {
     if (!loraOk) { Serial.println(F("[RADIO] unavailable: LoRa initialization failed")); return; }
     loraEnabled = !loraEnabled;
-    if (loraEnabled) { LoRa.idle(); lastHbMs = millis(); }
+    if (loraEnabled) { LoRa.idle(); }
     else LoRa.sleep();
     Serial.println(loraEnabled ? F("[RADIO] ON") : F("[RADIO] OFF: LoRa TX/RX stopped; laser audio continues"));
   }
@@ -577,8 +573,8 @@ void loop() {
   if (now - last >= 1000) {
     last = now;
     emitStatus(now);
-    micMin = 4095; micMax = 0; panMin = 4095; panMax = 0; panSum = 0; panCnt = 0;
-    rxPeak = 0; workSum = 0; workCnt = 0; workMax = 0;
+    micMin = 4095; micMax = 0; panMin = 4095; panMax = 0;
+    workSum = 0; workCnt = 0; workMax = 0;
   }
   delay(5);
 }

@@ -1,3 +1,4 @@
+import { isFresh } from './freshness'
 import type { LinkEvent, LinkState, Reading } from '../types'
 
 export type CommLevel = 'offline' | 'normal' | 'degraded' | 'emergency'
@@ -9,17 +10,16 @@ export const commLabels: Record<CommLevel, string> = {
   emergency: 'Emergency',
 }
 
-export const LINK_STATES: LinkState[] = ['Searching', 'Aligning', 'Locked', 'Degraded', 'Failover', 'Re-acquiring']
+export const LINK_STATES: LinkState[] = ['Searching', 'Locked', 'Failover']
 
 // Emergency means the system is running on the RF fallback
 export function assessLink(latest: Reading | null, connected: boolean, now: number): CommLevel {
-  if (!latest || !connected || now - latest.ts > 5000) return 'offline'
+  if (!latest || !isFresh(latest, connected, now)) return 'offline'
   if (latest.mode === 'rf') return 'degraded' // forced by the operator, not a failure
   switch (latest.linkState) {
     case 'Locked':
       return 'normal'
     case 'Failover':
-    case 'Re-acquiring':
       return 'emergency'
     default:
       return 'degraded'

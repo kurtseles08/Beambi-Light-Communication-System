@@ -2,7 +2,7 @@
 
   
 import type { ReactNode } from 'react'
-import { useLink } from '../store/link'
+import { useTelemetry } from '../hooks/useTelemetry'
 
 export type Tone = 'default' | 'ok' | 'warn' | 'crit'
 
@@ -66,6 +66,6 @@ export function Bar({ pct, tone = 'ok' }: { pct: number; tone?: Tone }) {
 
 // Says where the numbers come from, so simulated values are never mistaken for measurements
 export function SourceTag() {
-  const latest = useLink((s) => s.latest)
-  return latest ? <Pill tone="ok">Measured data</Pill> : <Pill>No data yet</Pill>
+  const { latest } = useTelemetry()
+  return latest ? <Pill tone="ok">Live telemetry</Pill> : <Pill>No data yet</Pill>
 }

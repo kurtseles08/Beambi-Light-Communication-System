@@ -1,3 +1,4 @@
+import { useTelemetry } from '../hooks/useTelemetry'
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { format } from 'date-fns'
@@ -84,8 +85,7 @@ function Header({ children }: { children?: ReactNode }) {
 }
 
 export default function Logs() {
-  const latest = useLink((s) => s.latest)
-  const connected = useLink((s) => s.connected)
+  const { latest } = useTelemetry()
   const settings = useLink((s) => s.settings)
   const events = useLink((s) => s.events)
   const runs = useLink((s) => s.runs)
@@ -103,28 +103,13 @@ export default function Logs() {
   const chart = useHistory(range, 10_000)
   const whole = useHistory(1440, 30_000) // for the whole-session average
 
-  if (!latest) {
-    return (
-      <div className="space-y-6">
-        <Header />
-        <Panel title="Waiting for data" index={1}>
-          <p className="text-[15px]">
-            {connected
-              ? 'Connected. Waiting for the first reading...'
-              : `Cannot reach the backend at ${BACKEND_URL}. Start everything with npm run dev from the project root.`}
-          </p>
-        </Panel>
-      </div>
-    )
-  }
-
   // ----- which numbers the four summary panels show
   const picked: Run | null = scope === 'active' ? activeRun : runs.find((r) => r.id === scope) ?? null
 
   const sessionAvg = whole.samples.length ? mean(whole.samples.map((s) => s.rssi)) : null
   const avgRssi = picked ? (picked.samples ? picked.avgRssi : null) : sessionAvg
   const maxRange = picked ? picked.distanceM : runs.reduce((m, r) => Math.max(m, r.distanceM), 0)
-  const uptimeSec = picked ? (picked.samples * picked.lockedPct) / 100 : latest.session.uptimeSec
+  const uptimeSec = picked ? (picked.samples * picked.lockedPct) / 100 : latest?.session.uptimeSec ?? 0
   const runSeconds = picked ? (picked.endedAt ? (picked.endedAt - picked.startedAt) / 1000 : picked.samples) : 0
   const scopeLabel = picked ? `${picked.distanceM} m run, ${format(picked.startedAt, 'd MMM HH:mm')}` : 'Whole session'
 
@@ -179,39 +164,36 @@ export default function Logs() {
         </div>
       </Header>
 
+      {!latest && <p className="rounded-xl border border-warn/40 bg-warn/10 p-3 text-sm">No fresh unit reports. Recorded history, events, and exports remain available.</p>}
+
       <div className="grid gap-5 lg:grid-cols-12">
         {/* Row 1: summary */}
-        <Panel title="Average RSSI" tone={rssiTone} index={1} className="lg:col-span-3" right={<Pill>{picked ? 'Run' : 'Session'}</Pill>}>
+        <Panel title="Average RSSI" tone={rssiTone} index={1} className="lg:col-span-4" right={<Pill>{picked ? 'Run' : 'Session'}</Pill>}>
           <Big mono tone={rssiTone}>{avgRssi === null ? '--' : avgRssi.toFixed(1)}</Big>
           <Sub>{picked ? 'Average signal strength over this run.' : 'Average signal strength over the last 24 hours of this session.'}</Sub>
           <div className="mt-3">
-            <Row label="Lock level" value={settings.lockAbove} />
+            <Row label="High signal display zone" value={settings.lockAbove} />
             {picked && <Row label="Lowest / highest" value={`${picked.minRssi.toFixed(0)} / ${picked.maxRssi.toFixed(0)}`} />}
           </div>
         </Panel>
 
-        <Panel title="Max range tested" index={2} className="lg:col-span-3" right={<Pill>{picked ? 'This run' : 'All runs'}</Pill>}>
+        <Panel title="Entered test distance" index={2} className="lg:col-span-4" right={<Pill>{picked ? 'This run' : 'All runs'}</Pill>}>
           <Big mono>{maxRange > 0 ? maxRange.toLocaleString('en-US') : '--'}{maxRange > 0 && <span className="ml-2 text-2xl">m</span>}</Big>
           <Sub>{picked ? 'Distance entered when this run started.' : 'Longest distance entered across all test runs.'}</Sub>
           <div className="mt-3"><Row label="Test runs" value={runs.length + (activeRun ? 1 : 0)} /></div>
         </Panel>
 
-        <Panel title="Packet delivery ratio" index={3} className="lg:col-span-3" right={<Pill>Not measured</Pill>}>
-          <Big mono>--</Big>
-          <Sub>The firmware does not count laser frames yet.</Sub>
-        </Panel>
-
-        <Panel title="Total uptime" index={4} className="lg:col-span-3" right={<Pill>{picked ? 'Run' : 'Session'}</Pill>}>
-          <Big mono>{formatDuration(uptimeSec)}</Big>
-          <Sub>{picked ? 'Time the optical link was locked during this run.' : 'How long the system has been running.'}</Sub>
+        <Panel title="Recorded duration" index={4} className="lg:col-span-4" right={<Pill>{picked ? 'Run' : 'Session'}</Pill>}>
+          <Big mono>{picked || latest ? formatDuration(uptimeSec) : '--'}</Big>
+          <Sub>{picked ? 'Time with both laser indications up during recorded samples.' : 'Backend session duration; device uptime is shown on Hardware.'}</Sub>
           <div className="mt-3">
             {picked ? (
               <>
                 <Row label="Run length" value={formatDuration(runSeconds)} />
-                <Row label="Locked" value={`${picked.lockedPct.toFixed(0)}%`} tone={picked.lockedPct >= 90 ? 'ok' : 'warn'} />
+                <Row label="Laser indication up" value={`${picked.lockedPct.toFixed(0)}%`} tone={picked.lockedPct >= 90 ? 'ok' : 'warn'} />
               </>
             ) : (
-              <Row label="Failovers" value={latest.session.failovers} />
+              <Row label="Failovers" value={latest?.session.failovers ?? '--'} />
             )}
           </div>
         </Panel>
@@ -248,9 +230,9 @@ export default function Logs() {
                     formatter={(v) => [Number(v).toFixed(1), 'RSSI']} />
                   <Line dataKey="rssi" name="RSSI" stroke="#3fae63" strokeWidth={2.5} dot={false} isAnimationActive={false} />
                   <ReferenceLine y={settings.lockAbove} stroke="#1d6b3a" strokeDasharray="6 4" strokeWidth={1.5}
-                    label={{ value: `Lock ${settings.lockAbove}`, position: 'insideTopLeft', fill: '#1d6b3a', fontSize: 12, fontWeight: 600 }} />
+                    label={{ value: `High signal ${settings.lockAbove}`, position: 'insideTopLeft', fill: '#1d6b3a', fontSize: 12, fontWeight: 600 }} />
                   <ReferenceLine y={settings.failBelow} stroke="#9b2c1f" strokeDasharray="6 4" strokeWidth={1.5}
-                    label={{ value: `Failover ${settings.failBelow}`, position: 'insideBottomLeft', fill: '#9b2c1f', fontSize: 12, fontWeight: 600 }} />
+                    label={{ value: `Low signal ${settings.failBelow}`, position: 'insideBottomLeft', fill: '#9b2c1f', fontSize: 12, fontWeight: 600 }} />
                 </LineChart>
               </ResponsiveContainer>
               <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-moss-600">

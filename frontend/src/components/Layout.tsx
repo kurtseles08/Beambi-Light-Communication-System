@@ -1,16 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import TopBar from './TopBar'
 import StatusBar from './StatusBar'
-import { useHazards } from '../store/hazards'
 import { useLink } from '../store/link'
 
 const isMouse = (e: ReactPointerEvent) => e.pointerType === 'mouse'
 
 export default function Layout() {
-  const refresh = useHazards((s) => s.refresh)
   const connect = useLink((s) => s.connect)
   const { pathname } = useLocation()
   const mainRef = useRef<HTMLElement>(null)
@@ -27,12 +25,6 @@ export default function Layout() {
   useEffect(() => {
     connect()
   }, [connect])
-
-  useEffect(() => {
-    refresh()
-    const id = setInterval(refresh, 5 * 60 * 1000)
-    return () => clearInterval(id)
-  }, [refresh])
 
   // Start each page at the top
   useEffect(() => {
@@ -65,7 +57,9 @@ export default function Layout() {
           <TopBar pinned={pinned} onTogglePin={togglePin} />
           <main ref={mainRef} className="flex-1 overflow-y-auto p-6">
             <div key={pathname}>
-              <Outlet />
+              <Suspense fallback={<p className="text-moss-600">Loading page…</p>}>
+                <Outlet />
+              </Suspense>
             </div>
           </main>
           <StatusBar />

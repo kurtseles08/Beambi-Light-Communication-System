@@ -1,21 +1,19 @@
+import { useFreshDevices } from "../hooks/useTelemetry";
 import { useState } from "react";
 import {
   selectUnit,
   sendCommand,
   setApplyBoth,
-  useDevice,
 } from "./deviceStore";
 import Panel from "../components/Panel";
 import { Bar, Pill, Row, Sub, type Tone } from "../components/ui";
 import type {
   DeviceCommand,
   DeviceStatus,
-  PongRecord,
   UnitId,
 } from "../types";
 
 import { signalOf } from "../lib/signal";
-import VoicePanel from "./VoicePanel";
 
 type SetKey = Extract<DeviceCommand, { cmd: "set" }>["k"];
 const btn =
@@ -158,19 +156,16 @@ function UnitView({
   online,
   applyBoth,
   dis,
-  pongs,
 }: {
   d: DeviceStatus;
   selected: UnitId;
   online: Record<UnitId, boolean>;
   applyBoth: boolean;
   dis: boolean;
-  pongs: PongRecord[];
 }) {
   const other: UnitId = selected === "A" ? "B" : "A";
 
-  // Shared settings go to both units when the switch is on. Calibrate, ping and
-  // message always go to the unit being viewed.
+  // Shared settings go to both units when enabled; calibration targets this unit.
   const sendShared = (c: DeviceCommand) =>
     sendCommand(c, applyBoth ? "both" : selected);
   const sendUnit = (c: DeviceCommand) => sendCommand(c, selected);
@@ -192,10 +187,10 @@ function UnitView({
   const locked = d.laser === 1 && d.failover === 0;
   const stateText = d.failover
     ? d.laser
-      ? "LoRa forced (laser is up)"
-      : "Failover: LoRa active"
+      ? "LoRa mode selected; laser indication up"
+      : "Laser indication down; LoRa telemetry"
     : d.laser
-      ? "Locked on laser (FSO)"
+      ? "Laser indication up"
       : "Searching";
   const stateTone: Tone = locked ? "ok" : d.failover ? "warn" : "default";
   const scale = Math.max(0.3, d.thr * 3, d.env * 1.2);
@@ -204,10 +199,7 @@ function UnitView({
   const adcBad = (p2p: number) => p2p < 5 || p2p > 4000;
   const heard = d.lora.peer !== "-" && d.lora.ageS >= 0;
   const stale = !heard || d.lora.ageS > 10;
-  const last = pongs.at(-1);
-  const haveBat = d.batV !== undefined && d.batV > 0;
-  const haveBatPct = d.batPct !== undefined && d.batPct >= 0;
-  const sampleRate = d.fs && d.fs > 0 ? d.fs : 8000;
+  const sampleRate = d.fs && d.fs > 0 ? d.fs : 5000;
   const sampleBudget = 1_000_000 / sampleRate;
 
   return (
@@ -427,45 +419,18 @@ function UnitView({
             value={heard ? `${d.lora.rssi} dBm / ${d.lora.snr} dB` : "Unknown"}
           />
           <Row label="Packets TX / RX" value={`${d.lora.tx} / ${d.lora.rx}`} />
-          <div className="mt-3 flex items-center gap-3">
-            <button
-              disabled={dis}
-              className={btn}
-              onClick={() => sendUnit({ cmd: "ping" })}
-            >
-              Ping peer
-            </button>
-            <span className="text-sm text-moss-600">
-              {last
-                ? `Pong from ${last.from}: ${last.rssi} dBm, ${last.snr} dB`
-                : "No pong yet"}
-            </span>
-          </div>
         </Panel>
         
-        <VoicePanel unit={selected} disabled={dis} index={4} className="lg:col-span-6" />
 
         <Panel
           title={`Device health (Unit ${selected})`}
           index={5}
           className="lg:col-span-12"
         >
-          {haveBat && (
-            <Row
-              label="Battery"
-              value={`${d.batV!.toFixed(2)} V${haveBatPct ? ` · ${d.batPct}%` : ""}`}
-              tone={
-                haveBatPct && d.batPct! <= 10
-                  ? "crit"
-                  : haveBatPct && d.batPct! <= 20
-                    ? "warn"
-                    : "default"
-              }
-            />
-          )}
-          {!haveBat && <Row label="Battery" value="Not measured (no battery sensor)" />}
+          {d.savedMicGain !== undefined && <Row label="Saved microphone gain" value={d.savedMicGain < 0 ? 'Not saved' : d.savedMicGain} />}
+          {d.micRailSamples !== undefined && <Row label="Microphone rail samples (cumulative)" value={d.micRailSamples} />}
+          {d.txClipSamples !== undefined && <Row label="TX clipped samples (cumulative)" value={d.txClipSamples} />}
           <Row label="Dashboard transport" value={d.transport ?? "USB"} />
-          <Row label="Wi-Fi" value={d.wifi === 0 ? "Off (GPIO13 available)" : d.wifi === 1 ? "On" : "Not reported"} />
           <Row label="Microphone ADC errors" value={d.adcErrors ?? "Not reported"}
             tone={(d.adcErrors ?? 0) > 0 ? "crit" : "default"} />
           <Row label="Microphone ADC min / max" value={d.micMin === undefined || d.micMax === undefined
@@ -502,7 +467,7 @@ function UnitView({
           </div>
           <Sub>
             The sampling budget is {sampleBudget.toFixed(0)} µs at {(sampleRate / 1000).toFixed(2)} kHz. A peak-to-peak near 0 or 4095
-            means a stuck or saturated ADC input.
+            can indicate a quiet, stuck, or saturated input; check ADC min/max and the physical signal.
           </Sub>
         </Panel>
       </div>
@@ -518,9 +483,8 @@ export default function HardwarePage() {
     selected,
     applyBoth,
     canCommand,
-    pongs,
     lastError,
-  } = useDevice();
+  } = useFreshDevices();
 
   if (!backendUp)
     return (
@@ -588,7 +552,6 @@ export default function HardwarePage() {
           online={unitsOnline}
           applyBoth={applyBoth}
           dis={!canCommand}
-          pongs={pongs}
         />
       )}
     </div>

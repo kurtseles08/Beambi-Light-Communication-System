@@ -1,9 +1,7 @@
 import { Link } from 'react-router-dom'
 import { format } from 'date-fns'
 import { Pin } from 'lucide-react'
-import { useHazards } from '../store/hazards'
 import { useLink } from '../store/link'
-import { assess, type Level } from '../lib/hazardStatus'
 import { assessLink, commLabels, type CommLevel } from '../lib/linkStatus'
 import { useNow } from '../hooks/useNow'
 import Lamp, { type LampLevel } from './Lamp'
@@ -13,13 +11,6 @@ const linkLamp: Record<CommLevel, LampLevel> = {
   degraded: 'warn',
   emergency: 'crit',
   offline: 'off',
-}
-
-const hazardLamp: Record<Level, LampLevel> = {
-  normal: 'ok',
-  watch: 'warn',
-  warning: 'crit',
-  unknown: 'off',
 }
 
 function Indicator({ to, label, value, level }: { to: string; label: string; value: string; level: LampLevel }) {
@@ -41,19 +32,17 @@ export default function TopBar({ pinned, onTogglePin }: Props) {
   const nowMs = useNow()
   const now = new Date(nowMs)
 
-  const weather = useHazards((s) => s.weather)
-  const quakes = useHazards((s) => s.quakes)
   const latest = useLink((s) => s.latest)
   const connected = useLink((s) => s.connected)
 
-  const hazard = assess(weather, quakes)
   const link = assessLink(latest, connected, nowMs)
 
   // Military date-time group, zone H = UTC+8
   const dtg = `${format(now, 'ddHHmm')}H ${format(now, 'MMM yy').toUpperCase()}`
 
-  const dataLevel: LampLevel = connected ? 'ok' : 'crit'
-  const dataValue = connected ? 'Live' : 'Disconnected'
+  const fresh = connected && !!latest && nowMs - latest.ts < 5000
+  const dataLevel: LampLevel = fresh ? 'ok' : 'crit'
+  const dataValue = fresh ? 'Live' : connected ? 'No fresh reports' : 'Disconnected'
 
   return (
     <header className="flex min-h-[72px] flex-wrap items-center justify-between gap-3 border-b border-forest-900/10 bg-mint-50/60 px-6 py-3">
@@ -79,7 +68,6 @@ export default function TopBar({ pinned, onTogglePin }: Props) {
 
       <div className="flex flex-wrap items-center gap-2">
         <Indicator to="/" label="Link" value={commLabels[link]} level={linkLamp[link]} />
-        <Indicator to="/disaster" label="Hazard" value={hazard.label} level={hazardLamp[hazard.level]} />
         <Indicator to="/hardware" label="Data" value={dataValue} level={dataLevel} />
       </div>
     </header>

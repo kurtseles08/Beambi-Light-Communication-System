@@ -1,1 +1,0 @@
-export const NOISE_REF_DBM = -95

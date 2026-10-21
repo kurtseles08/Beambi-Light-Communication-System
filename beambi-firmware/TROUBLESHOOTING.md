@@ -3,7 +3,7 @@
 The audio path is local: analog microphone GPIO13 -> laser PWM GPIO27 ->
 remote solar receiver GPIO35 -> DAC GPIO25 -> speaker amplifier.
 The backend exchanges telemetry and controls, not audio. LoRa currently carries
-only heartbeats, text and ping replies. Force LoRa does not provide voice backup;
+status telemetry, commands, heartbeats, text and ping replies. Force LoRa does not provide voice backup;
 path mode does not switch or mute the laser/DAC audio processing.
 
 ## Test in this order
@@ -26,11 +26,12 @@ path mode does not switch or mute the laser/DAC audio processing.
    detector output. Test one direction at a time before enabling both speakers.
 5. Compare `over` before and after 10 seconds. Wi-Fi is absent in the rollback. It is a
    cumulative missed-sample counter; the increase matters. `workAvg` should
-   stay below the 125 microsecond sample period, with margin. A low average
+   stay below the 200 microsecond sample period, with margin. A low average
    alone does not exclude scheduling jitter or occasional long ADC reads.
 6. Repeat with the backend/dashboard connected. Confirm reported TX is 4 and
-   RX is 0 after commands. Configure backend SERIAL_PATHS with actual COM ports,
-   restart the backend and leave periodic USB reports enabled (q toggles them).
+   RX is 0 after commands. For Bluetooth use BLE_ENABLED=true with SERIAL_PATHS and SERIAL_PATH empty.
+   For USB fallback configure SERIAL_PATHS with actual COM ports and leave
+   periodic USB reports enabled (q toggles them). Restart after env changes.
 
 If using the serial monitor, close it before the backend opens the same USB
 port. Equivalent serial keys: `k` speaker tone, `p` panel audio, `3` laser tone,
@@ -46,7 +47,7 @@ The laser needs a driver that accepts the firmware's 80 kHz PWM modulation.
 
 The current link indicator detects received amplitude, not a dedicated pilot;
 it does not verify intelligible voice. A TX tone is available with key `3`.
-Calibrate only with the receiving panel covered and the remote laser off.
+Calibrate with the receiving panel UNCOVERED in normal operating light and the remote laser OFF. Keep quiet for the three-second measurement, then restore the remote laser.
 Calibrating with a transmitted tone present can set the threshold too high,
 potentially keeping the link marked down. There is no automatic pilot in Mic mode.
 

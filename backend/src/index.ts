@@ -5,18 +5,15 @@ import cors from 'cors'
 import { randomUUID } from 'node:crypto'
 import { Server } from 'socket.io'
 import { createStore } from './store.js'
-import { loadSettings, sanitize, saveSettings } from './settings.js'
-import { createHardware, type UnitReport } from './hardware.js'
+import { createHardware } from './hardware.js'
 import { createSerialBridge, type DeviceBridge } from './serial.js'
 import { startBluetoothBridge } from './ble.js'
 import type {
-  DeviceCommand, DeviceStatus, LinkEvent, LoraMessage,
-  PongRecord, Reading, Settings, UnitId,
+  DeviceCommand, DeviceStatus, LinkEvent, Reading, UnitId,
 } from './types.js'
 
 const TICK_MS = 1000
 const MAX_READINGS = 120
-const MAX_LORA_LOG = 100
 const STALE_MS = 5000
 const ORIGINS = process.env.CORS_ORIGIN?.split(',') ?? ['http://localhost:5173', 'http://127.0.0.1:5173']
 const COMMAND_TOKEN = process.env.COMMAND_TOKEN || ''
@@ -28,24 +25,18 @@ if (!COMMAND_TOKEN) {
   console.warn('COMMAND_TOKEN is not set: anyone who can reach this server can command the hardware')
 }
 
-let settings: Settings = loadSettings()
 const store = await createStore()
-const hw = createHardware(() => settings)
+const hw = createHardware()
 
 // ---------------------------------------------------------------- state
 const readings: Reading[] = []
-const loraLog: LoraMessage[] = []
-const pongs: PongRecord[] = []
 let device: DeviceStatus | null = null
 let deviceConnected = false
 const devices: Record<UnitId, DeviceStatus | null> = { A: null, B: null }
 const lastSeen: Record<UnitId, number> = { A: 0, B: 0 }
 const unitsOnline: Record<UnitId, boolean> = { A: false, B: false }
-const wifiQueue: Record<UnitId, DeviceCommand[]> = { A: [], B: [] }
+const commandQueue: Record<UnitId, DeviceCommand[]> = { A: [], B: [] }
 const serialUnits: Partial<Record<UnitId, DeviceBridge>> = {}
-
-// Voice messages and packet logs are not reported by the firmware yet.
-// They stay empty so the dashboard's init payload keeps its shape.
 
 // ---------------------------------------------------------------- server
 const app = express()
@@ -71,7 +62,7 @@ function setDeviceConnected(c: boolean) {
 
 // ---------------------------------------------------------------- HTTP routes
 app.get('/health', (_req, res) => res.json({ status: 'ok', source: 'hardware', deviceConnected,
-  transport: device?.transport ?? null, time: new Date().toISOString() }))
+  transport: device?.transport ?? null, persistence: store.persistence, pendingWrites: store.pendingWrites(), time: new Date().toISOString() }))
 app.get('/api/latest', (_req, res) => res.json(readings.at(-1) ?? null))
 app.get('/api/device', (req, res) => {
   const unit = req.query.unit
@@ -86,20 +77,7 @@ app.get('/api/history', (req, res) => {
   res.json({ samples: store.history(minutes), persistence: store.persistence })
 })
 
-// Optional HTTP ingest of a simple per-unit report. Disabled unless DEVICE_KEY is set.
-app.post('/api/telemetry', (req, res) => {
-  if (!DEVICE_KEY) { res.status(403).json({ error: 'disabled (set DEVICE_KEY)' }); return }
-  if (req.get('x-api-key') !== DEVICE_KEY) { res.status(401).json({ error: 'bad key' }); return }
-  const b = req.body as Partial<UnitReport> | undefined
-  if (!b || (b.unit !== 'A' && b.unit !== 'B') || typeof b.rssi !== 'number' || !Number.isFinite(b.rssi)) {
-    res.status(400).json({ error: 'need unit (A or B) and a numeric rssi' })
-    return
-  }
-  hw.ingest(b as UnitReport)
-  res.json({ ok: true })
-})
-
-// One endpoint for everything a Wi-Fi unit says: status, hello, cal, lora_msg, pong.
+// Local Bluetooth bridge posts complete firmware status here.
 // The reply carries any dashboard commands waiting for that unit.
 app.post('/api/device', (req, res) => {
   if (!DEVICE_KEY) { res.status(403).json({ error: 'disabled (set DEVICE_KEY)' }); return }
@@ -109,10 +87,10 @@ app.post('/api/device', (req, res) => {
   const unit: UnitId | null = b.unit === 'A' || b.unit === 'B' ? b.unit : null
   if (b.t === 'status' && !unit) { res.status(400).json({ error: 'need unit A or B' }); return }
   onDeviceLine(b)
-  res.json({ ok: true, cmds: unit ? wifiQueue[unit].splice(0) : [] })
+  res.json({ ok: true, cmds: unit ? commandQueue[unit].splice(0) : [] })
 })
 
-// ---------------------------------------------------------------- device messages (USB or Wi-Fi)
+// ---------------------------------------------------------------- device messages (USB or Bluetooth)
 function onDeviceLine(o: Record<string, unknown>) {
   switch (o.t) {
     case 'status': {
@@ -129,8 +107,6 @@ function onDeviceLine(o: Record<string, unknown>) {
         io.emit('device', device)
       }
 
-      const peerHeard = s.lora.ok === 1 && s.lora.peer !== '-' && s.lora.ageS >= 0 && s.lora.ageS <= 10
-      const haveBat = typeof s.batPct === 'number' && s.batPct >= 0 && typeof s.batV === 'number' && s.batV > 0
       hw.ingest({
         unit: s.unit,
         // log scale: env = thr gives 50, 10x thr gives 100, 0.1x thr gives 0
@@ -138,35 +114,7 @@ function onDeviceLine(o: Record<string, unknown>) {
         mode: MODE_MAP[s.mode] ?? 'auto',
         laserOk: s.laser === 1,
         channel: s.failover ? 'RF' : 'FSO',
-        rfRssi: peerHeard ? s.lora.rssi : undefined,
-        rfSnr: peerHeard ? s.lora.snr : undefined,
-        battery: haveBat ? s.batPct : undefined,
-        voltage: haveBat ? s.batV : undefined,
       })
-      break
-    }
-    // Path, failover and mode events are raised by hardware.ts, so 'event' lines are ignored here.
-    case 'cal':
-      emitEvent('Info', 'calibration', `Link threshold set to ${Number(o.thr).toFixed(3)} (noise mean ${Number(o.mean).toFixed(3)})`)
-      break
-    case 'lora_msg': {
-      const m: LoraMessage = {
-        id: randomUUID(), ts: Date.now(), from: String(o.from ?? '?'),
-        rssi: Number(o.rssi) || 0, snr: Number(o.snr) || 0, text: String(o.text ?? '').slice(0, 200),
-      }
-      loraLog.push(m)
-      if (loraLog.length > MAX_LORA_LOG) loraLog.shift()
-      io.emit('lora:msg', m)
-      break
-    }
-    case 'pong': {
-      const p: PongRecord = {
-        id: randomUUID(), ts: Date.now(), from: String(o.from ?? '?'), seq: String(o.seq ?? ''),
-        rssi: Number(o.rssi) || 0, snr: Number(o.snr) || 0,
-      }
-      pongs.push(p)
-      if (pongs.length > MAX_LORA_LOG) pongs.shift()
-      io.emit('lora:pong', p)
       break
     }
     case 'hello':
@@ -236,11 +184,6 @@ function validateCommand(c: unknown): DeviceCommand | null {
       return v === 0 || v === 1 || v === 2 ? { cmd: 'mode', v } : null
     }
     case 'cal': return { cmd: 'cal' }
-    case 'ping': return { cmd: 'ping' }
-    case 'msg': {
-      const text = typeof o.text === 'string' ? o.text.replace(/[\r\n]/g, ' ').slice(0, 40).trim() : ''
-      return text ? { cmd: 'msg', text } : null
-    }
     default: return null
   }
 }
@@ -261,7 +204,7 @@ setInterval(() => {
     changed = true
     if (!on) {
       devices[u] = null
-      wifiQueue[u].length = 0
+      commandQueue[u].length = 0
     }
     if (u !== SHOWN_UNIT) emitEvent(on ? 'Info' : 'Critical', 'device', `Unit ${u} ${on ? 'online' : 'offline'}`)
   }
@@ -278,7 +221,7 @@ io.on('connection', (socket) => {
 
   socket.emit('init', {
     readings, events: store.events, runs: store.runs, activeRun: store.activeRun(),
-    device, deviceConnected, loraLog, pongs, canCommand, devices, unitsOnline,
+    device, deviceConnected, canCommand, devices, unitsOnline,
   })
 
   socket.on('device:command', (raw, target?: unknown) => {
@@ -294,21 +237,14 @@ io.on('connection', (socket) => {
       if (bridge?.isOpen()) {
         ok = bridge.send(cmd) || ok
       } else {
-        // Wi-Fi units pick up queued commands with their next report.
-        const q = wifiQueue[u]
+        // The Bluetooth bridge picks up commands with the next report.
+        const q = commandQueue[u]
         if (q.length >= 20) q.shift()
         q.push(cmd)
         ok = true
       }
     }
     socket.emit('device:ack', { ok, error: ok ? undefined : 'unit not connected' })
-  })
-
-  socket.on('settings:update', (patch) => {
-    if (typeof patch !== 'object' || patch === null) return
-    settings = sanitize(patch as Partial<Settings>, settings)
-    saveSettings(settings)
-    io.emit('settings', settings)
   })
 
   socket.on('run:start', (p: { distanceM?: unknown; notes?: unknown }) => {
@@ -351,6 +287,7 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 4000
 server.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`)
+  const address = server.address()
+  console.log(`Backend running on port ${typeof address === 'object' && address ? address.port : PORT}`)
   startBluetoothBridge()
 })

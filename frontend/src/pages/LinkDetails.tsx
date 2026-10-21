@@ -1,8 +1,8 @@
+import { useTelemetry, useFreshDevices } from '../hooks/useTelemetry'
 import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { useLink, BACKEND_URL } from '../store/link'
-import { useDevice } from '../device/deviceStore'
 import Panel from '../components/Panel'
 import Gauge from '../components/Gauge'
 import { Big, Pill, Row, SourceTag, Sub, type Tone } from '../components/ui'
@@ -82,7 +82,7 @@ function SignalTrend({ data }: { data: { t: number; rssi: number }[] }) {
 }
 
 function FsoTab() {
-  const readings = useLink((s) => s.readings)
+  const { readings } = useTelemetry()
   const settings = useLink((s) => s.settings)
   const latest = readings[readings.length - 1]
   const f = latest.fso
@@ -91,12 +91,12 @@ function FsoTab() {
   const zoneTone: Tone = zone === 'locked' ? 'ok' : zone === 'marginal' ? 'warn' : 'crit'
 
   const recent = readings.slice(-60)
-  const data = recent.map((r, i) => ({ t: i - (recent.length - 1), rssi: r.fso.rssi }))
+  const data = recent.map((r) => ({ t: (r.ts - latest.ts) / 1000, rssi: r.fso.rssi }))
 
   return (
     <div className="grid gap-5 lg:grid-cols-12">
       <Panel title="Optical signal" tone={zoneTone} index={1} className="lg:col-span-6"
-        right={<Pill tone={zoneTone}>{zone === 'locked' ? 'Above lock' : zone === 'marginal' ? 'Marginal' : 'Below failover'}</Pill>}>
+        right={<Pill tone={zoneTone}>{zone === 'locked' ? 'High signal' : zone === 'marginal' ? 'Marginal' : 'Low signal'}</Pill>}>
         <Gauge value={f.rssi} fail={settings.failBelow} lock={settings.lockAbove} />
         <div className="mt-3">
           <Row label="RSSI" value={f.rssi.toFixed(1)} tone={zoneTone} />
@@ -106,8 +106,7 @@ function FsoTab() {
       <Panel title="Hardware status" index={2} className="lg:col-span-6"
         right={<Pill tone={f.laserOk ? 'ok' : 'warn'}>{f.laserOk ? 'Link up' : 'Link down'}</Pill>}>
         <Row label="Laser link" value={f.laserOk ? 'Up' : 'Down'} tone={f.laserOk ? 'ok' : 'warn'} />
-        <Row label="Receiver type" value={settings.receiver === 'solar-panel' ? 'Solar panel' : 'Photodiode'} />
-        <Row label="Carrying traffic" value={latest.activeChannel === 'FSO' ? 'Yes' : 'No, on RF fallback'}
+        <Row label="Selected path" value={latest.activeChannel === 'FSO' ? 'Laser' : 'LoRa telemetry'}
           tone={latest.activeChannel === 'FSO' ? 'ok' : 'warn'} />
       </Panel>
 
@@ -121,9 +120,9 @@ function FsoTab() {
 // ---------- RF tab: what the unit's own LoRa module reports about its peer ----------
 
 function RfTab() {
-  const d = useDevice((s) => s.device)
-  const linked = useDevice((s) => s.deviceConnected)
-  const latest = useLink((s) => s.latest)!
+  const { device: d, deviceConnected: linked } = useFreshDevices()
+  const { latest } = useTelemetry()
+  if (!latest) return null
   if (!linked || !d) {
     return (
       <Panel title="LoRa radio" tone="crit" index={1}>
@@ -157,8 +156,7 @@ function RfTab() {
 // ---------- page ----------
 
 export default function LinkDetails() {
-  const latest = useLink((s) => s.latest)
-  const connected = useLink((s) => s.connected)
+  const { latest, connected } = useTelemetry()
   const [tab, setTab] = useState<TabId>('fso')
 
   if (!latest) {
@@ -168,7 +166,7 @@ export default function LinkDetails() {
         <Panel title="Waiting for data" index={1}>
           <p className="text-[15px]">
             {connected
-              ? 'Connected. Waiting for the first reading...'
+              ? 'No fresh unit reports. Check unit power and the Bluetooth or USB connection.'
               : `Cannot reach the backend at ${BACKEND_URL}. Start everything with npm run dev from the project root.`}
           </p>
         </Panel>

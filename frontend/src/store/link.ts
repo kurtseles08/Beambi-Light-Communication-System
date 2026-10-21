@@ -1,14 +1,15 @@
 import { create } from 'zustand'
-import { io, type Socket } from 'socket.io-client'
+import type { Socket } from 'socket.io-client'
+import { socket } from '../lib/socket'
+export { BACKEND_URL } from '../lib/socket'
 import { DEFAULT_SETTINGS } from '../lib/defaults'
 import type { LinkEvent, Reading, Run, Settings } from '../types'
 
-export const BACKEND_URL: string = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:4000'
 const MAX_READINGS = 120
 const MAX_EVENTS = 500
 
-// The two display zones live in the browser so a backend echo can never move the sliders back
-const ZONE_KEY = 'beambi.zones.v2'
+// Display zones are browser preferences, never firmware controls.
+const ZONE_KEY = 'beambi.zones.v3'
 type Zones = Pick<Settings, 'failBelow' | 'lockAbove'>
 
 function readZones(): Zones {
@@ -16,8 +17,8 @@ function readZones(): Zones {
   let lockAbove: number = DEFAULT_SETTINGS.lockAbove
   try {
     const z = JSON.parse(localStorage.getItem(ZONE_KEY) ?? '{}')
-    if (Number.isFinite(z.failBelow)) failBelow = z.failBelow
-    if (Number.isFinite(z.lockAbove)) lockAbove = z.lockAbove
+    if (Number.isFinite(z.failBelow)) failBelow = Math.min(80, Math.max(1, z.failBelow))
+    if (Number.isFinite(z.lockAbove)) lockAbove = Math.min(95, Math.max(2, z.lockAbove))
   } catch {
     /* storage unavailable, use defaults */
   }
@@ -37,12 +38,10 @@ type Init = {
   events: LinkEvent[]
   runs?: Run[]
   activeRun?: Run | null
-  settings: Settings
 }
 
 type LinkStore = {
   connected: boolean
-  source: string | null
   latest: Reading | null
   readings: Reading[]
   events: LinkEvent[]
@@ -56,14 +55,8 @@ type LinkStore = {
   stopRun: () => void
 }
 
-// Slider drags are sent to the backend in one batch, 250 ms after the last move
-let pending: Partial<Settings> = {}
-let timer: ReturnType<typeof setTimeout> | null = null
-let lastEdit = 0
-
 export const useLink = create<LinkStore>((set, get) => ({
   connected: false,
-  source: null,
   latest: null,
   readings: [],
   events: [],
@@ -74,7 +67,6 @@ export const useLink = create<LinkStore>((set, get) => ({
 
   connect: () => {
     if (get().socket) return // already connected
-    const socket = io(BACKEND_URL)
     socket.on('connect', () => set({ connected: true }))
     socket.on('disconnect', () => set({ connected: false }))
     socket.on('init', (d: Init) =>
@@ -83,7 +75,6 @@ export const useLink = create<LinkStore>((set, get) => ({
         events: d.events,
         runs: d.runs ?? [],
         activeRun: d.activeRun ?? null,
-        settings: { ...DEFAULT_SETTINGS, ...d.settings, ...readZones() },
         latest: d.readings.at(-1) ?? null,
       }),
     )
@@ -93,11 +84,8 @@ export const useLink = create<LinkStore>((set, get) => ({
     socket.on('event', (e: LinkEvent) => set((s) => ({ events: [...s.events, e].slice(-MAX_EVENTS) })))
     socket.on('run:active', (run: Run | null) => set({ activeRun: run }))
     socket.on('run:done', (run: Run) => set((s) => ({ runs: [run, ...s.runs.filter((r) => r.id !== run.id)].slice(0, 50) })))
-    socket.on('settings', (settings: Settings) => {
-      if (Date.now() - lastEdit < 1000) return // ignore the echo of our own edit
-      set({ settings: { ...DEFAULT_SETTINGS, ...settings, ...readZones() } })
-    })
     set({ socket })
+    socket.connect()
   },
 
   updateSettings: (patch) => {
@@ -106,17 +94,9 @@ export const useLink = create<LinkStore>((set, get) => ({
     if (patch.lockAbove !== undefined && next.failBelow >= next.lockAbove) next.failBelow = Math.max(0, next.lockAbove - 1)
     else if (patch.failBelow !== undefined && next.lockAbove <= next.failBelow) next.lockAbove = next.failBelow + 1
 
-    lastEdit = Date.now()
     set({ settings: next })
     saveZones(next)
 
-    pending = { ...pending, ...patch, failBelow: next.failBelow, lockAbove: next.lockAbove }
-    if (timer) clearTimeout(timer)
-    timer = setTimeout(() => {
-      get().socket?.emit('settings:update', pending)
-      pending = {}
-      timer = null
-    }, 250)
   },
 
   startRun: (distanceM, notes) => get().socket?.emit('run:start', { distanceM, notes }),

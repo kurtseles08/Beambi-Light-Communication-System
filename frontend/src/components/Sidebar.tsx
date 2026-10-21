@@ -9,11 +9,8 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
-  TriangleAlert,
   Crosshair,
   Radio,
-  CloudSun,
-  ShieldCheck,
   ScrollText,
   Settings,
   ChevronRight,
@@ -37,16 +34,8 @@ const groups: { title: string; items: Item[] }[] = [
     ],
   },
   {
-    title: "Situation",
-    items: [
-      { to: "/disaster", label: "Disaster Status", icon: TriangleAlert },
-      { to: "/environment", label: "Environment", icon: CloudSun },
-    ],
-  },
-  {
     title: "Control",
     items: [
-      { to: "/security", label: "Security", icon: ShieldCheck },
       { to: "/logs", label: "Logs & Analytics", icon: ScrollText },
       { to: "/settings", label: "Settings", icon: Settings },
     ],

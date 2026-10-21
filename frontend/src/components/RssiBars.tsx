@@ -1,4 +1,5 @@
 import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { recentReadings } from '../lib/freshness'
 import type { Reading } from '../types'
 
 type Props = { readings: Reading[]; fail: number; lock: number; height?: number }
@@ -9,8 +10,8 @@ const GRID = 'rgba(15, 42, 26, 0.12)'
 
 // One bar per second for the last 60 seconds, colored by zone: green locked, amber marginal, red below failover
 export default function RssiBars({ readings, fail, lock, height = 400 }: Props) {
-  const recent = readings.slice(-60)
-  const data = recent.map((r, i) => ({ t: i - (recent.length - 1), rssi: r.fso.rssi }))
+  const recent = recentReadings(readings, 60)
+  const data = recent.map((r) => ({ t: (r.ts - recent[recent.length - 1].ts) / 1000, rssi: r.fso.rssi }))
   // Round labels (-45s, -30s, -15s, now). Add the first bar's label only when it is not crowding the next one.
   const first = data.length ? data[0].t : 0
   const marks = [-45, -30, -15, 0].filter((t) => t >= first)
@@ -35,9 +36,9 @@ export default function RssiBars({ readings, fail, lock, height = 400 }: Props) 
           ))}
         </Bar>
         <ReferenceLine y={lock} stroke="#1d6b3a" strokeDasharray="6 4" strokeWidth={2}
-          label={{ value: `Lock ${lock}`, position: 'insideTopLeft', fill: '#1d6b3a', fontSize: 12, fontWeight: 600 }} />
+          label={{ value: `High ${lock}`, position: 'insideTopLeft', fill: '#1d6b3a', fontSize: 12, fontWeight: 600 }} />
         <ReferenceLine y={fail} stroke="#9b2c1f" strokeDasharray="6 4" strokeWidth={2}
-          label={{ value: `Failover ${fail}`, position: 'insideTopLeft', fill: '#9b2c1f', fontSize: 12, fontWeight: 600 }} />
+          label={{ value: `Low ${fail}`, position: 'insideTopLeft', fill: '#9b2c1f', fontSize: 12, fontWeight: 600 }} />
       </BarChart>
     </ResponsiveContainer>
   )
